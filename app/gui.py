@@ -8,31 +8,45 @@ gui.py —— PyQt5 桌面界面：国密区块链电子文件加密存证系统
     3. 验真页：三重校验结果以红绿图标区分，内置「篡改 / 伪造签名」攻击演示
     4. 底部实时日志栏输出每一步操作
 
-运行：
-    conda activate contract-chain && python -m app.gui
-    或直接双击项目根目录的 run_gui.bat
+运行（任选其一）：
+    python -m app.gui      # 在项目根目录执行（推荐）
+    python app/gui.py      # 直接运行脚本文件
+    双击项目根目录的 run_gui.bat
 """
 
 import os
 import sys
 import time
+import warnings
 
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
-from PyQt5.QtWidgets import (
-    QApplication,
-    QComboBox,
-    QFileDialog,
-    QGroupBox,
-    QHBoxLayout,
-    QLabel,
-    QMainWindow,
-    QMessageBox,
-    QPlainTextEdit,
-    QPushButton,
-    QTabWidget,
-    QVBoxLayout,
-    QWidget,
-)
+# PyQt5 5.15 在 Python 3.11+ 下会对每个 PyQt 子类抛出 sipPyTypeDict 弃用告警，
+# 属上游已知噪音；过滤必须在定义 Worker/DropArea/MainWindow 之前生效。
+warnings.filterwarnings("ignore", message="sipPyTypeDict")
+
+try:
+    from PyQt5.QtCore import Qt, QThread, pyqtSignal
+    from PyQt5.QtWidgets import (
+        QApplication,
+        QComboBox,
+        QFileDialog,
+        QGroupBox,
+        QHBoxLayout,
+        QLabel,
+        QMainWindow,
+        QMessageBox,
+        QPlainTextEdit,
+        QPushButton,
+        QTabWidget,
+        QVBoxLayout,
+        QWidget,
+    )
+except ImportError as exc:  # 缺少 GUI 依赖时给出可执行提示，而非直接抛栈
+    sys.stderr.write(
+        "未检测到 PyQt5，无法启动图形界面。\n"
+        "请先安装依赖：pip install PyQt5\n"
+        "（或运行项目根目录的 run_gui.bat，会自动补装）\n"
+    )
+    raise SystemExit(1) from exc
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -109,7 +123,7 @@ class DropArea(QLabel):
         if urls:
             self.load_path(urls[0].toLocalFile())
 
-    def mousePressEvent(self, event):
+    def mousePressEvent(self,event):
         path, _ = QFileDialog.getOpenFileName(self, "选择文件")
         if path:
             self.load_path(path)
@@ -470,7 +484,13 @@ class MainWindow(QMainWindow):
 
 
 def main():
+    # Windows 缩放屏下启用高分屏适配，避免界面模糊（须在 QApplication 之前设置）
+    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+
     app = QApplication(sys.argv)
+    app.setApplicationName("国密区块链电子文件存证系统")
+    app.setOrganizationName("contract-chain-demo")
     app.setStyle("Fusion")
     win = MainWindow()
     win.show()
