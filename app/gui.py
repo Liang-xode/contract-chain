@@ -1,12 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-gui.py —— PyQt5 桌面界面：国密区块链电子文件加密存证系统
+gui.py —— PyQt5 桌面界面：国密区块链通用电子文件加密存证系统
+
+界面外观定义在同目录的 gui.ui 中（可用 Qt Designer 直接打开修改），
+本文件只负责业务逻辑与信号绑定。
 
 功能：
     1. 文件拖拽上传（或点击选择），自动计算并显示 SM3 指纹
     2. 一键签署并上链，分步展示 SM2 签名过程（指纹 → 载荷 → 签名 → 共识上链）
     3. 验真页：三重校验结果以红绿图标区分，内置「篡改 / 伪造签名」攻击演示
-    4. 底部实时日志栏输出每一步操作
+    4. 底部实时日志栏输出每一步操作（与上方内容之间有可拖动分隔条）
 
 运行（任选其一）：
     python -m app.gui      # 在项目根目录执行（推荐）
@@ -20,26 +23,13 @@ import time
 import warnings
 
 # PyQt5 5.15 在 Python 3.11+ 下会对每个 PyQt 子类抛出 sipPyTypeDict 弃用告警，
-# 属上游已知噪音；过滤必须在定义 Worker/DropArea/MainWindow 之前生效。
+# 属上游已知噪音；过滤必须在导入/定义任何 PyQt 子类之前生效。
 warnings.filterwarnings("ignore", message="sipPyTypeDict")
 
 try:
+    from PyQt5 import uic
     from PyQt5.QtCore import Qt, QThread, pyqtSignal
-    from PyQt5.QtWidgets import (
-        QApplication,
-        QComboBox,
-        QFileDialog,
-        QGroupBox,
-        QHBoxLayout,
-        QLabel,
-        QMainWindow,
-        QMessageBox,
-        QPlainTextEdit,
-        QPushButton,
-        QTabWidget,
-        QVBoxLayout,
-        QWidget,
-    )
+    from PyQt5.QtWidgets import QApplication, QMainWindow
 except ImportError as exc:  # 缺少 GUI 依赖时给出可执行提示，而非直接抛栈
     sys.stderr.write(
         "未检测到 PyQt5，无法启动图形界面。\n"
@@ -52,7 +42,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from crypto import crypto as cc
 from blockchain.chain import EvidenceChain
+from app import config
 from app.service import FileEvidenceService
+
+UI_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gui.ui")
 
 OK_ICON = "✅"
 BAD_ICON = "❌"
@@ -89,69 +82,23 @@ class Worker(QThread):
             self.fail.emit(f"{type(exc).__name__}: {exc}")
 
 
-class DropArea(QLabel):
-    """文件拖拽区：支持拖拽与点击选择，载入后发出 fileLoaded 信号。"""
-
-    fileLoaded = pyqtSignal(str, bytes)
-
-    def __init__(self, hint: str, parent=None):
-        super().__init__(hint, parent)
-        self.setAlignment(Qt.AlignCenter)
-        self.setMinimumHeight(96)
-        self.setAcceptDrops(True)
-        self.setCursor(Qt.PointingHandCursor)
-        self._reset_style()
-
-    def _reset_style(self):
-        self.setStyleSheet(
-            "QLabel { border: 2px dashed #B9BDC7; border-radius: 10px;"
-            " color: #6B7280; padding: 12px; background: rgba(127,127,127,8%); }"
-        )
-
-    def _loaded_style(self):
-        self.setStyleSheet(
-            "QLabel { border: 2px solid #1DC981; border-radius: 10px;"
-            " color: #111827; padding: 12px; background: rgba(29,201,129,8%); }"
-        )
-
-    def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
-
-    def dropEvent(self, event):
-        urls = event.mimeData().urls()
-        if urls:
-            self.load_path(urls[0].toLocalFile())
-
-    def mousePressEvent(self,event):
-        path, _ = QFileDialog.getOpenFileName(self, "选择文件")
-        if path:
-            self.load_path(path)
-
-    def load_path(self, path: str):
-        try:
-            with open(path, "rb") as fh:
-                data = fh.read()
-        except OSError as exc:
-            QMessageBox.warning(self, "读取失败", f"无法读取文件：\n{exc}")
-            return
-        name = os.path.basename(path)
-        self.setText(f"📄 {name}\n{len(data):,} 字节")
-        self._loaded_style()
-        self.fileLoaded.emit(name, data)
-
-
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("国密区块链通用电子文件加密存证系统 · PyQt5 控制台")
-        self.resize(1000, 760)
-        self.setMinimumSize(900, 680)
+        # 界面由 gui.ui 定义，加载后所有具名控件成为本实例的属性
+        uic.loadUi(UI_PATH, self)
+
+        # 允许自由拉伸：最小尺寸放得很小，日志区可拖动分隔条调整
+        self.setMinimumSize(420, 320)
+        self.splitter.setChildrenCollapsible(False)
+        self.splitter.setStretchFactor(0, 3)
+        self.splitter.setStretchFactor(1, 1)
+        self.splitter.setSizes([560, 180])
 
         # ---- 业务对象 ----
         self.chain = EvidenceChain(nodes=["node-A", "node-B", "node-C"],
                                    required_confirmations=2)
-        self.svc = FileEvidenceService(self.chain)
+        self.svc = FileEvidenceService(self.chain, state_path=config.STATE_PATH)
         self.uploader = cc.Signer.generate()   # 上传方身份（私钥仅存内存，不出本地）
         self.auditor = cc.Signer.generate()    # 审计方身份
         self._file_counter = 0
@@ -160,136 +107,43 @@ class MainWindow(QMainWindow):
         self.tab1_file = None                  # (name, data) → (name, data, digest)
         self.tab2_file = None                  # (name, data)
         self._workers = []
-        self.rows = {}
 
-        self._build_ui()
+        # 三重校验结果行：名称 → .ui 中的 QLabel
+        self.rows = {
+            "链上存证": self.row_chain,
+            "完整性(SM3)": self.row_digest,
+            "签名(SM2)": self.row_sign,
+        }
+
+        self._bind()
+        self._reset_rows()
+        self._load_history()                   # 重启后从本地快照回填历史链上存证
+
         self.log("系统就绪：模拟联盟链节点 node-A / node-B / node-C，共识确认数 2")
         self.log(f"上传方身份已生成（私钥仅存内存），公钥指纹 {self.uploader.pubkey_fingerprint}")
         self.log(f"审计方身份已生成，公钥指纹 {self.auditor.pubkey_fingerprint}")
         self.log("提示：把任意文件拖入虚线框（或点击选择），自动计算 SM3 指纹")
 
-    # ------------------------------------------------------------------ UI
-    def _build_ui(self):
-        central = QWidget()
-        root = QVBoxLayout(central)
-        root.setContentsMargins(12, 12, 12, 12)
-        root.setSpacing(10)
-
-        self.tabs = QTabWidget()
-        self.tabs.addTab(self._build_sign_tab(), "① 存证与签署")
-        self.tabs.addTab(self._build_verify_tab(), "② 验真与攻击演示")
-        root.addWidget(self.tabs, 1)
-
-        root.addWidget(self._build_log_panel())
-        self.setCentralWidget(central)
-
-    def _build_sign_tab(self):
-        page = QWidget()
-        lay = QVBoxLayout(page)
-
-        drop_box = QGroupBox("① 上传文件 —— 拖拽到此处，或点击选择")
-        dlay = QVBoxLayout(drop_box)
-        self.drop_sign = DropArea("将任意电子文件拖到这里\n合同 / 论文 / 病历 / 图纸 / 源代码 / 报表 …")
+    # ------------------------------------------------------------- 信号绑定
+    def _bind(self):
         self.drop_sign.fileLoaded.connect(self.on_sign_file)
-        dlay.addWidget(self.drop_sign)
-        self.lbl_sign_digest = QLabel("SM3 指纹：待上传")
-        self.lbl_sign_digest.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        dlay.addWidget(self.lbl_sign_digest)
-        lay.addWidget(drop_box)
-
-        sign_box = QGroupBox("② 一键签署并上链 —— 分步展示 SM2 签名过程")
-        slay = QVBoxLayout(sign_box)
-        id_row = QHBoxLayout()
-        id_row.addWidget(QLabel(f"上传方公钥指纹：{self.uploader.pubkey_fingerprint}"))
-        id_row.addWidget(QLabel(f"审计方公钥指纹：{self.auditor.pubkey_fingerprint}"))
-        id_row.addStretch(1)
-        slay.addLayout(id_row)
-
-        btn_row = QHBoxLayout()
-        self.btn_sign = QPushButton("签署并上链（上传方 SM2 签名）")
-        self.btn_sign.clicked.connect(self.on_sign)
-        self.btn_countersign = QPushButton("追加多方签认（审计方）")
-        self.btn_countersign.clicked.connect(self.on_countersign)
-        btn_row.addWidget(self.btn_sign)
-        btn_row.addWidget(self.btn_countersign)
-        slay.addLayout(btn_row)
-
-        self.lbl_sign_result = QLabel("签名结果：尚未签署")
-        self.lbl_sign_result.setWordWrap(True)
-        self.lbl_sign_result.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        slay.addWidget(self.lbl_sign_result)
-        lay.addWidget(sign_box)
-
-        lay.addStretch(1)
-        return page
-
-    def _build_verify_tab(self):
-        page = QWidget()
-        lay = QVBoxLayout(page)
-
-        pick_row = QHBoxLayout()
-        pick_row.addWidget(QLabel("选择链上存证："))
-        self.cmb_evidence = QComboBox()
-        self.cmb_evidence.setMinimumWidth(420)
-        pick_row.addWidget(self.cmb_evidence)
-        pick_row.addStretch(1)
-        lay.addLayout(pick_row)
-
-        drop_box = QGroupBox("待验真文件（拖拽 / 点击选择；留空则自动使用存证页文件）")
-        dlay = QVBoxLayout(drop_box)
-        self.drop_verify = DropArea("将待验真的文件拖到这里")
         self.drop_verify.fileLoaded.connect(self.on_verify_file)
-        dlay.addWidget(self.drop_verify)
-        self.lbl_verify_digest = QLabel("本地 SM3 指纹：待载入")
-        dlay.addWidget(self.lbl_verify_digest)
-        lay.addWidget(drop_box)
-
-        btn_row = QHBoxLayout()
-        self.btn_verify = QPushButton("三重验真")
+        self.btn_sign.clicked.connect(self.on_sign)
+        self.btn_countersign.clicked.connect(self.on_countersign)
         self.btn_verify.clicked.connect(self.on_verify)
-        self.btn_tamper = QPushButton("模拟攻击：篡改 1 字节")
         self.btn_tamper.clicked.connect(self.on_tamper)
-        self.btn_forge = QPushButton("模拟攻击：伪造签名")
         self.btn_forge.clicked.connect(self.on_forge)
-        for btn in (self.btn_verify, self.btn_tamper, self.btn_forge):
-            btn_row.addWidget(btn)
-        lay.addLayout(btn_row)
+        self.btn_clear_log.clicked.connect(self.log_box.clear)
 
-        result_box = QGroupBox("三重校验结果（✅ 通过 / ❌ 失败）")
-        rlay = QVBoxLayout(result_box)
-        self.rows["链上存证"] = QLabel()
-        self.rows["完整性(SM3)"] = QLabel()
-        self.rows["签名(SM2)"] = QLabel()
-        for name in ("链上存证", "完整性(SM3)", "签名(SM2)"):
-            self.rows[name].setWordWrap(True)
-            rlay.addWidget(self.rows[name])
-        self.lbl_conclusion = QLabel("结论：—")
-        self.lbl_conclusion.setWordWrap(True)
-        rlay.addWidget(self.lbl_conclusion)
-        lay.addWidget(result_box)
+        for lbl in (self.lbl_sign_digest, self.lbl_verify_digest, self.lbl_sign_result):
+            lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
 
-        lay.addStretch(1)
-        self._reset_rows()
-        return page
+        self.lbl_uploader_id.setText(f"上传方公钥指纹：{self.uploader.pubkey_fingerprint}")
+        self.lbl_auditor_id.setText(f"审计方公钥指纹：{self.auditor.pubkey_fingerprint}")
 
-    def _build_log_panel(self):
-        box = QGroupBox("实时日志")
-        lay = QVBoxLayout(box)
-        self.log_box = QPlainTextEdit()
-        self.log_box.setReadOnly(True)
-        self.log_box.setMaximumBlockCount(3000)
-        self.log_box.setMinimumHeight(150)
         font = self.log_box.font()
         font.setFamily("Consolas")
         self.log_box.setFont(font)
-        lay.addWidget(self.log_box)
-        row = QHBoxLayout()
-        row.addStretch(1)
-        btn_clear = QPushButton("清空日志")
-        btn_clear.clicked.connect(self.log_box.clear)
-        row.addWidget(btn_clear)
-        lay.addLayout(row)
-        return box
 
     # ------------------------------------------------------------- 日志/线程
     def log(self, msg: str):
@@ -365,11 +219,29 @@ class MainWindow(QMainWindow):
         self.log(f"审计方追加签认完成：主体 {result['signer']}，存证号 {ev_no}")
         self._register_evidence(ev_no, f"{name}（审计签认）")
 
-    def _register_evidence(self, ev_no, filename):
+    def _register_evidence(self, ev_no, filename, quiet=False):
         label = f"{short(ev_no, 12, 6)} ｜ {filename}"
         self.cmb_evidence.addItem(label, ev_no)
         self.cmb_evidence.setCurrentIndex(self.cmb_evidence.count() - 1)
-        self.log(f"存证已加入验真列表：{label}")
+        if not quiet:
+            self.log(f"存证已加入验真列表：{label}")
+
+    def _load_history(self):
+        """启动时从本地快照恢复的历史链上存证：回填验真下拉框，避免重启后看不到历史。"""
+        history = self.svc.list_chain_evidence()
+        if not history:
+            return
+        max_no = 0
+        for item in history:
+            self._register_evidence(item["evidence_no"], item["file_name"], quiet=True)
+            tail = (item.get("file_id") or "").rsplit("-", 1)[-1]
+            if tail.isdigit():
+                max_no = max(max_no, int(tail))
+        self._file_counter = max_no           # 续编号，避免新存证 file_id 与历史冲突
+        if self.cmb_evidence.count():
+            self.cmb_evidence.setCurrentIndex(self.cmb_evidence.count() - 1)
+        self.log(f"已从本地快照恢复 {len(history)} 条历史链上存证，链高度 {self.chain.height()}"
+                 "（重启不再丢失，可直接验真 / 解密）")
 
     # ------------------------------------------------------- 验真与攻击演示
     def on_verify_file(self, name, data):

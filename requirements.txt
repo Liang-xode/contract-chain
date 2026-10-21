@@ -1,2 +1,4 @@
 gmssl>=3.2.2
 PyQt5>=5.15
+SQLAlchemy>=2.0
+PyMySQL>=1.1
