@@ -20,12 +20,15 @@ service.py —— 业务逻辑层：通用电子文件加密存证、验真溯�
 业务层只调用 crypto / blockchain / dao 的抽象接口，不接触算法与 SQL 细节。
 """
 
+import os
 import time
 
 from crypto import crypto as cc
 from blockchain.chain import Block, EvidenceChain, Transaction
 
+from app import config
 from app.dao import (
+    CipherStore,
     EvidenceRepository,
     SessionRepository,
     SignerRepository,
@@ -46,7 +49,8 @@ def gen_evidence_no(file_digest: str, signer_fp: str, ts: float) -> str:
 
 
 class FileEvidenceService:
-    def __init__(self, chain: EvidenceChain, session_factory=None, state_path=None):
+    def __init__(self, chain: EvidenceChain, session_factory=None, state_path=None,
+                 cipher_store_dir=None):
         self.chain = chain
         self._session_factory = session_factory or get_session_factory()
 
@@ -56,9 +60,12 @@ class FileEvidenceService:
         self.evidence = EvidenceRepository(self._session_factory)
         self.signers = SignerRepository(self._session_factory)
 
-        # 密文与会话密钥仅存内存、绝不入库（硬性约束：原文与私钥不入库）；
-        # 其中密文（非原文）为支持「重启后历史文件仍可授权解密」而写入链状态快照。
-        self._files = {}                 # file_id -> 密文/元数据
+        # 本机密文文件服务器：SM4 密文 C 以独立 .enc 文件落盘（非原文/私钥/会话密钥）
+        self._cipher_store = CipherStore(cipher_store_dir)
+
+        # 密文路径 / 盐 仅存内存、绝不入库（硬性约束：原文与私钥不入库）；
+        # 其中密文路径指向 cipher_store/ 下的 .enc 文件；历史快照中的 cipher_hex 作为兼容回退。
+        self._files = {}                 # file_id -> 密文元数据
         self._current_user = None        # 当前登录用户（ORM 对象）
         self._current_token = None       # 当前登录令牌
 
@@ -75,46 +82,54 @@ class FileEvidenceService:
         """
         对任意电子文件做加密存证：
           - SM3 计算文件指纹（原文不上链）
-          - SM4 加密原文存储（保密）
+          - 每份文件独立随机盐 + PBKDF2-HMAC-SHA256 派生 SM4 会话密钥（高强度 KDF）
+          - SM4 加密原文存储（保密，密文仅内存，盐随链上 Transaction.extra 记录）
           - 上传方用 SM2 对「文件标识+指纹+时间」签名，上链存证
         返回存证凭证。
         meta 可携带文件名、类型、大小、归属单位等描述信息。
         """
         digest = cc.sm3_hash(raw_content)                      # 1) SM3 指纹
-        session_key = cc.derive_sm4_key(passphrase)           # 2) 会话密钥（演示用口令派生）
-        cipher = cc.sm4_encrypt(session_key, raw_content)     # 3) SM4 加密原文
+        salt = cc.random_salt(16)                              # 2) 每份文件独立随机盐
+        session_key = cc.derive_sm4_key_v2(passphrase, salt)   # 3) PBKDF2 高强度 KDF
+        cipher = cc.sm4_encrypt(session_key, raw_content)     # 4) SM4 加密原文
 
         ts = time.time()
         sign_payload = f"{file_id}|{digest}|{ts}".encode()
-        signature = uploader.sign(sign_payload)               # 4) 上传方 SM2 签名
+        signature = uploader.sign(sign_payload)               # 5) 上传方 SM2 签名
         ev_no = gen_evidence_no(digest, uploader.pubkey_fingerprint, ts)
 
+        # Transaction.extra 扩展格式：file_id|filename|salt_hex（三段，向后兼容两段）
         tx = Transaction(
             evidence_no=ev_no, contract_hash=digest,
             signer_fp=uploader.pubkey_fingerprint, signature=signature,
             pubkey=uploader.public_key, ts=ts,
-            extra=file_id + "|" + filename,                    # 链上附文件名标识
+            extra=f"{file_id}|{filename}|{salt.hex()}",
         )
-        receipt = self.chain.submit_evidence(tx)              # 5) 存证上链
+        receipt = self.chain.submit_evidence(tx)              # 6) 存证上链
 
-        # 6) 持久化（DAO）：只存 指纹/公钥/签名/链哈希/语义索引，不含原文与私钥
+        # 7) 密文 C 独立落盘到本机文件服务器（非原文 / 私钥 / 会话密钥）
+        cipher_path = self._cipher_store.save(file_id, cipher)
+
+        # 8) 持久化（DAO）：只存 指纹/公钥/签名/链哈希/语义索引/密文路径，不含原文与私钥
         uploader_id = self._current_user.id if self._current_user else None
         self.evidence.save_evidence(
             file_sha256=digest, file_name=filename,
             signer_pubkey=uploader.public_key, signature=signature,
             chain_hash=receipt["block_hash"],
-            semantic_index=self._semantic_index(filename, digest, meta),
+            semantic_index=self._build_semantic_index(filename, digest, meta),
             uploader_id=uploader_id,
+            cipher_path=cipher_path,
         )
         self.signers.register(self._signer_name(meta), uploader.public_key, uploader_id)
 
-        # 7) 密文仅存内存（不落库）
+        # 9) 内存态仅保留密文路径 + 随机盐（会话密钥由口令 + 盐派生，不落盘）
         self._files[file_id] = {
             "id": file_id, "filename": filename, "digest": digest,
-            "cipher_hex": cipher.hex(), "session_key": session_key.hex(),
+            "cipher_path": cipher_path,                          # 密文 C 的落盘路径
+            "salt": salt.hex(),                                # 独立盐随文件记录
             "meta": meta or {}, "created_ts": ts, "uploader_id": uploader_id,
         }
-        self._save_state()                                    # 8) 落盘链状态（重启不丢）
+        self._save_state()                                    # 10) 落盘链状态（重启不丢）
         return {"file_id": file_id, "filename": filename, "digest": digest, "receipt": receipt}
 
     # ---------- 2. 多方签认 ----------
@@ -143,7 +158,7 @@ class FileEvidenceService:
             file_sha256=digest, file_name=filename,
             signer_pubkey=signer.public_key, signature=signature,
             chain_hash=receipt["block_hash"],
-            semantic_index=self._semantic_index(filename, digest, None),
+            semantic_index=self._build_semantic_index(filename, digest, None),
             uploader_id=uploader_id,
         )
         self.signers.register("signer", signer.public_key, uploader_id)
@@ -203,18 +218,134 @@ class FileEvidenceService:
     # ---------- 4. 授权解密还原 ----------
     def decrypt_file(self, file_id: str, passphrase: str) -> bytes:
         """
-        授权解密：用正确口令派生会话密钥，SM4 解密密文，还原原始文件。
-        这是 SM4 保密性的完整闭环体现 —— 原文以密文形式保密存储（仅内存、不落库），
-        只有掌握口令（会话密钥）的授权方才能解密查看原文。
+        授权解密：从本机密文文件服务器读取密文 C，用正确口令派生会话密钥，SM4 解密还原原文。
+        这是 SM4 保密性的完整闭环 —— 原文以密文形式落盘（独立 .enc 文件），
+        只有掌握口令的授权方才能解密查看原文。
+
+        密文来源（兼容策略）：
+          - 优先：cipher_store/<file_id>.enc 独立密文文件（新存证主路径）
+          - 回退：历史 evidence_state.json 快照中的 cipher_hex（旧版内存密文）
+          - 两者皆无 → 报错拒绝
+
+        KDF 兼容：
+          - 新存证（record 有 salt 字段）→ PBKDF2-HMAC-SHA256 × 200000 迭代
+          - 历史存证（record 无 salt 字段）→ 旧固定盐 + SM3 派生（向后兼容）
         """
         record = self._files.get(file_id)
         if not record:
-            raise ValueError("文件不存在")
-        key = cc.derive_sm4_key(passphrase)
+            raise ValueError("文件不存在：请先确认已存证且未重启丢失内存态")
+
+        # ① 读取密文 C：优先独立密文文件，回退历史快照中的 cipher_hex
         try:
-            return cc.sm4_decrypt(key, bytes.fromhex(record["cipher_hex"]))
+            cipher = self._cipher_store.load(file_id)
+        except FileNotFoundError:
+            cipher_hex = record.get("cipher_hex")
+            if not cipher_hex:
+                raise ValueError(f"密文文件缺失且无历史密文：file_id={file_id}，无法解密")
+            cipher = bytes.fromhex(cipher_hex)
+
+        # ② 派生会话密钥
+        salt_hex = record.get("salt")
+        if salt_hex:
+            key = cc.derive_sm4_key_v2(passphrase, bytes.fromhex(salt_hex))
+        else:
+            key = cc.derive_sm4_key(passphrase)
+
+        try:
+            return cc.sm4_decrypt(key, cipher)
         except (ValueError, IndexError):
             raise ValueError("口令错误：SM4 解密失败，无法还原原文（保密性生效）")
+
+    # ---------- 4-0. 明文保存（供验真） ----------
+    def save_recovered_file(self, filename: str, data: bytes, target_path: str = None) -> str:
+        """
+        把授权解密还原后的明文保存到本地（供「验真溯源」页选中做指纹比对）。
+          - target_path 不为空 → 写入用户指定路径（GUI「另存为」对话框的选择）
+          - 否则 → 默认保存到 <项目根>/recovered/<filename>（文件名取自存证时的原名，保留扩展名）
+        返回实际保存路径。
+        安全说明：此为【授权解密后】接收方主动保存的明文，不改变存证环节「原文不落盘」的原则。
+        """
+        if target_path:
+            path = target_path
+            os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
+        else:
+            recovered_dir = os.environ.get("CONTRACT_CHAIN_RECOVERED_DIR", config.RECOVERED_DIR)
+            os.makedirs(recovered_dir, exist_ok=True)
+            # 文件名仅保留安全字符，保留扩展名
+            safe = "".join(c for c in filename if c.isalnum() or c in "._-（）() ")
+            safe = safe.strip() or "recovered.bin"
+            path = os.path.join(recovered_dir, safe)
+        with open(path, "wb") as f:
+            f.write(data)
+        return path
+
+    # ---------- 4-1. 解密 → 验真闭环（P0-4） ----------
+    def decrypt_and_verify(self, file_id: str, passphrase: str) -> dict:
+        """
+        一体化闭环：输入存证 file_id + 授权口令 → 解密还原原文 → 重算 SM3 →
+        与链上 contract_hash 比对 → 返回验真结论。
+
+        返回 dict 包含：
+          - ok          : bool —— 解密成功
+          - verified    : bool —— 还原后的 SM3 与链上一致（即"还原的就是被存证的那份"）
+          - decrypted   : bytes —— 还原后的明文（ok=True 时有效）
+          - local_digest: str —— 还原后重新计算的 SM3
+          - chain_digest: str —— 链上存证的 contract_hash
+          - error       : str —— 解密失败 / 链上查不到存证时的错误信息
+          - filename    : str
+          - size        : int
+          - evidence_no : str —— 链上存证编号（可用于进一步 evidence_report）
+
+        说明：此方法证明 "解密还原的明文 = 链上存证对应的原始文件" ——
+        这是加密存证最核心的价值承诺：保密（只有口令持有者能解密） +
+        可信（解密出来的东西就是被存证的那份，没有被篡改或替换）。
+        """
+        record = self._files.get(file_id)
+        if not record:
+            return {"ok": False, "verified": False, "error": f"文件未存证或内存态已丢失（file_id={file_id}）"}
+
+        # ① 解密
+        try:
+            plaintext = self.decrypt_file(file_id, passphrase)
+        except ValueError as exc:
+            return {"ok": False, "verified": False,
+                    "filename": record.get("filename"),
+                    "error": str(exc)}
+
+        # ② 重算 SM3
+        local_digest = cc.sm3_hash(plaintext)
+
+        # ③ 查链：file_id → 搜链上所有 transaction 的 extra 前缀，找到对应存证
+        chain_tx = None
+        for blk in self.chain.chain():
+            for tx in blk.get("txs", []):
+                extra = tx.get("extra") or ""
+                if extra.startswith(file_id + "|"):
+                    chain_tx = tx
+                    break
+            if chain_tx:
+                break
+
+        result = {
+            "ok": True,
+            "decrypted": plaintext,
+            "size": len(plaintext),
+            "filename": record.get("filename"),
+            "local_digest": local_digest,
+            "verified": False,
+            "error": None,
+        }
+        if chain_tx is None:
+            result["error"] = "链上找不到该 file_id 对应的存证记录"
+            result["verified"] = False
+            return result
+
+        result["evidence_no"] = chain_tx["evidence_no"]
+        result["chain_digest"] = chain_tx["contract_hash"]
+        result["verified"] = (local_digest == chain_tx["contract_hash"])
+        if not result["verified"]:
+            result["error"] = "解密成功但还原后的 SM3 与链上存证不一致 —— 密文可能被篡改"
+        return result
 
     # ---------- 5. 存证凭证 ----------
     def evidence_report(self, evidence_no: str) -> dict:
@@ -344,10 +475,77 @@ class FileEvidenceService:
         return len(self.evidence.find_by_user(None))
 
     def search_evidence(self, query: str, actor=None) -> list:
-        """语义检索（当前为关键词索引匹配，预留 AI 向量检索）；结果按权限过滤。"""
+        """
+        关键词检索（P0-5 方案 B，如实降级，预留 LLM 语义扩展）。
+
+        DAO 层（硬约束收口）：先调 EvidenceRepository.semantic_search(query) 做候选召回 ——
+          - 按 semantic_index LIKE '%q%' 或 file_name LIKE '%q%' 匹配，DAO 负责 DB 层检索
+          - 返回候选 contract_hash 集合
+        Service 层：遍历链上所有存证，取 contract_hash 在候选集合里的，叠加权限过滤 +
+          file_id/file_name 关键词二次校验（覆盖 DAO 没覆盖的字段）。
+
+        返回 dict 含 evidence_no / file_id / file_name / file_sha256 / uploader_id / uploader_username。
+        预留扩展点：DAO EvidenceRepository.semantic_search 可换成 PostgreSQL tsvector / MySQL FULLTEXT；
+        LLM 语义增强（方案 A）通过替换 _extract_semantic_terms 接口不变。
+        """
         user = self._actor(actor)
-        return [self._evidence_dto(r)
-                for r in self._filter_owned(self.evidence.semantic_search(query), user)]
+        q = (query or "").lower().strip()
+        if not q:
+            return []
+
+        # DAO 层：先按 semantic_index + file_name 做候选召回
+        dao_candidates = self.evidence.semantic_search(query)
+        candidate_hashes = {r.file_sha256 for r in dao_candidates} if dao_candidates else set()
+
+        # 预加载 DAO 里所有 uploader 关联（contract_hash → uploader_id / semantic_index）
+        all_records = self.evidence.find_all()
+        hash_to_uploader = {}
+        hash_to_semantic = {}
+        for r in all_records:
+            hash_to_uploader.setdefault(r.file_sha256, r.uploader_id)
+            hash_to_semantic.setdefault(r.file_sha256, r.semantic_index or "")
+
+        results = []
+        for ev in self.list_chain_evidence():
+            contract_hash = ev.get("contract_hash")
+            # 第一层过滤：DAO 召回
+            if candidate_hashes and contract_hash not in candidate_hashes:
+                continue
+            uploader_id = hash_to_uploader.get(contract_hash)
+            # 权限过滤
+            if user is None:
+                if uploader_id is not None:
+                    continue    # 未登录只能看 uploader_id 为 None 的匿名存证
+            elif user.role not in PRIVILEGED_ROLES:
+                if uploader_id != user.id:
+                    continue
+            # 第二层：file_id + file_name 关键词校验（覆盖 DAO semantic_search 没覆盖的字段）
+            haystack = " ".join([
+                str(ev.get("file_id") or "").lower(),
+                str(ev.get("file_name") or "").lower(),
+                str(hash_to_semantic.get(contract_hash, "") or "").lower(),
+                str(contract_hash or "").lower(),
+            ])
+            if q not in haystack:
+                continue
+            uploader_username = ""
+            if uploader_id:
+                try:
+                    ur = self.users.find_by_id(uploader_id)
+                    uploader_username = ur.username if ur else ""
+                except Exception:
+                    uploader_username = ""
+            results.append({
+                "evidence_no": ev.get("evidence_no"),
+                "file_id": ev.get("file_id"),
+                "file_name": ev.get("file_name"),
+                "file_sha256": contract_hash,
+                "uploader_id": uploader_id,
+                "uploader_username": uploader_username,
+                "block_index": ev.get("block_index"),
+                "ts": ev.get("ts"),
+            })
+        return results
 
     def evidence_by_fingerprint(self, fingerprint: str, actor=None) -> list:
         """按指纹查询存证（验真/溯源）；结果按权限过滤。"""
@@ -372,7 +570,10 @@ class FileEvidenceService:
         for blk in self.chain.chain():
             for tx in blk.get("txs", []):
                 extra = tx.get("extra") or ""
-                file_id, _, fname = extra.partition("|")
+                # extra 格式：file_id|filename|salt_hex（三段，向后兼容旧的两段）
+                parts = extra.split("|")
+                file_id = parts[0] if parts else ""
+                fname = parts[1] if len(parts) > 1 else file_id
                 out.append({
                     "evidence_no": tx["evidence_no"],
                     "file_id": file_id,
@@ -442,12 +643,44 @@ class FileEvidenceService:
 
     # ---------- 内部小工具 ----------
     @staticmethod
-    def _semantic_index(filename: str, digest: str, meta: dict) -> str:
-        """构建语义索引文本（文件名 + 指纹 + 元数据），作为 AI 语义检索的占位实现。"""
-        parts = [str(filename), str(digest)]
+    def _build_semantic_index(filename: str, digest: str, meta: dict) -> str:
+        """
+        组装关键词检索索引文本（P0-5 方案 B，如实降级关键词检索）。
+        安全边界：只处理 文件名 + meta + 指纹，绝不接触原文 / 密文 / 私钥。
+
+        未来接 LLM 语义增强（方案 A）：把 _extract_semantic_terms 内部替换为
+        LLM 摘要 / 向量化关键词生成，输入仍为 filename + meta（不含敏感原文），
+        调用方与 DAO 层零改动。接口已预留 Hook 点。
+        """
+        terms = FileEvidenceService._extract_semantic_terms(filename, meta)
+        parts = terms + [str(filename), str(digest)]
         if meta:
             parts.extend(f"{k}:{v}" for k, v in meta.items())
-        return " ".join(parts)
+        return " ".join(p for p in parts if p)
+
+    @staticmethod
+    def _extract_semantic_terms(filename: str, meta: dict = None) -> list:
+        """
+        从文件名 + 元数据中抽取关键词（朴素分词：中英文 / 分隔符切分 + 去重）。
+        这是方案 B 的核心；方案 A 时，此方法将替换为 LLM 摘要生成（保持签名不变）。
+
+        输入边界：只接收 filename + meta，绝不接收 / 处理原文 / 密文 / 私钥。
+        """
+        import re
+        terms = set()
+        # 文件名分词：按中英文常见分隔符切割
+        tokens = re.split(r"[\s_\-\.\(\)\[\]\{\}【】（）,，、/\\]+", filename.lower())
+        for t in tokens:
+            t = t.strip()
+            # 去掉纯扩展名（pdf/docx）过短词，除非它本身就是独立语义单元
+            if len(t) >= 2 or (meta and t in meta):
+                terms.add(t)
+        # meta 里的值如果是字符串也纳入关键词
+        if meta:
+            for v in meta.values():
+                if isinstance(v, str) and len(v) >= 2:
+                    terms.add(v)
+        return sorted(terms)
 
     @staticmethod
     def _signer_name(meta: dict) -> str:

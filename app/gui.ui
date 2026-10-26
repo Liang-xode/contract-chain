@@ -44,6 +44,7 @@
     border-radius: 10px;
 }
 QPushButton#btn_nav_sign, QPushButton#btn_nav_verify,
+QPushButton#btn_nav_search, QPushButton#btn_nav_decrypt,
 QPushButton#btn_nav_center, QPushButton#btn_nav_users {
     background: transparent;
     color: #A9C4DA;
@@ -52,11 +53,13 @@ QPushButton#btn_nav_center, QPushButton#btn_nav_users {
     padding: 7px 16px;
 }
 QPushButton#btn_nav_sign:hover, QPushButton#btn_nav_verify:hover,
+QPushButton#btn_nav_search:hover, QPushButton#btn_nav_decrypt:hover,
 QPushButton#btn_nav_center:hover, QPushButton#btn_nav_users:hover {
     color: #FFFFFF;
     background: rgba(73, 216, 255, 35);
 }
 QPushButton#btn_nav_sign:checked, QPushButton#btn_nav_verify:checked,
+QPushButton#btn_nav_search:checked, QPushButton#btn_nav_decrypt:checked,
 QPushButton#btn_nav_center:checked, QPushButton#btn_nav_users:checked {
     color: #FFFFFF;
     background: rgba(33, 200, 246, 60);
@@ -99,6 +102,26 @@ QLabel#lbl_nav_user {
         <widget class="QPushButton" name="btn_nav_verify">
          <property name="text">
           <string>验真溯源</string>
+         </property>
+         <property name="checkable">
+          <bool>true</bool>
+         </property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QPushButton" name="btn_nav_search">
+         <property name="text">
+          <string>存证检索</string>
+         </property>
+         <property name="checkable">
+          <bool>true</bool>
+         </property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QPushButton" name="btn_nav_decrypt">
+         <property name="text">
+          <string>授权解密</string>
          </property>
          <property name="checkable">
           <bool>true</bool>
@@ -473,9 +496,21 @@ QLabel#lbl_nav_user {
          </item>
         </layout>
        </widget>
+       <widget class="QWidget" name="tab_search">
+        <attribute name="title">
+         <string>③ 存证检索</string>
+        </attribute>
+        <layout class="QVBoxLayout" name="tab_search_layout"/>
+       </widget>
+       <widget class="QWidget" name="tab_decrypt">
+        <attribute name="title">
+         <string>④ 授权解密与报告</string>
+        </attribute>
+        <layout class="QVBoxLayout" name="tab_decrypt_layout"/>
+       </widget>
        <widget class="QWidget" name="tab_center">
         <attribute name="title">
-         <string>③ 用户中心</string>
+         <string>⑤ 用户中心</string>
         </attribute>
         <layout class="QVBoxLayout" name="tab_center_layout">
          <item>
@@ -820,7 +855,7 @@ QLabel#lbl_nav_user {
        </widget>
        <widget class="QWidget" name="tab_users">
         <attribute name="title">
-         <string>④ 用户权限管理</string>
+         <string>⑥ 用户权限管理</string>
         </attribute>
         <layout class="QVBoxLayout" name="tab_users_layout">
          <item>

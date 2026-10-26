@@ -30,13 +30,24 @@ warnings.filterwarnings("ignore", message="sipPyTypeDict")
 try:
     from PyQt5 import uic
     from PyQt5.QtCore import Qt, QThread, pyqtSignal
+    from PyQt5.QtGui import QFont
     from PyQt5.QtWidgets import (
         QAbstractItemView,
         QApplication,
         QDialog,
+        QFileDialog,
+        QGroupBox,
+        QHBoxLayout,
+        QHeaderView,
+        QLabel,
+        QLineEdit,
         QMainWindow,
         QMessageBox,
+        QPushButton,
+        QTableWidget,
         QTableWidgetItem,
+        QVBoxLayout,
+        QWidget,
     )
 except ImportError as exc:  # 缺少 GUI 依赖时给出可执行提示，而非直接抛栈
     sys.stderr.write(
@@ -49,6 +60,7 @@ except ImportError as exc:  # 缺少 GUI 依赖时给出可执行提示，而非
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from crypto import crypto as cc
+from crypto.crypto import KeyStore
 from blockchain.chain import EvidenceChain
 from app import config
 from app.login import LoginDialog
@@ -94,6 +106,81 @@ class Worker(QThread):
             self.fail.emit(f"{type(exc).__name__}: {exc}")
 
 
+class PassphraseDialog(QDialog):
+    """存证授权口令输入对话框：口令至少 6 位，输入过程即时校验，确定/取消。"""
+
+    MIN_LEN = 6
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("存证授权口令")
+        self.setModal(True)
+        self.setMinimumWidth(440)
+
+        layout = QVBoxLayout(self)
+
+        tip = QLabel(
+            "请设置本次存证的授权口令（至少 6 位）。\n"
+            "该口令经 PBKDF2 派生 SM4 会话密钥加密原文，且不落库；"
+            "后续「授权解密」必须输入同一口令。")
+        tip.setWordWrap(True)
+        layout.addWidget(tip)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("口令："))
+        self.edt_passphrase = QLineEdit()
+        self.edt_passphrase.setEchoMode(QLineEdit.Password)
+        self.edt_passphrase.setPlaceholderText("至少 6 位")
+        row.addWidget(self.edt_passphrase, 1)
+        layout.addLayout(row)
+
+        self.lbl_msg = QLabel("")
+        self.lbl_msg.setWordWrap(True)
+        self.lbl_msg.setMinimumHeight(20)
+        layout.addWidget(self.lbl_msg)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
+        self.btn_ok = QPushButton("确定")
+        self.btn_ok.setDefault(True)
+        self.btn_ok.setEnabled(False)          # 长度达标前不可提交
+        self.btn_cancel = QPushButton("取消")
+        btn_row.addWidget(self.btn_ok)
+        btn_row.addWidget(self.btn_cancel)
+        layout.addLayout(btn_row)
+
+        self.edt_passphrase.textChanged.connect(self._on_text_changed)
+        self.edt_passphrase.returnPressed.connect(self._on_accept)
+        self.btn_ok.clicked.connect(self._on_accept)
+        self.btn_cancel.clicked.connect(self.reject)
+
+    def _on_text_changed(self, text):
+        ok = len(text) >= self.MIN_LEN
+        self.btn_ok.setEnabled(ok)
+        if not text:
+            self.lbl_msg.clear()
+        elif ok:
+            self.lbl_msg.setText(f"✅ 口令长度 {len(text)} 位")
+            self.lbl_msg.setStyleSheet(f"color:{GREEN};")
+        else:
+            self._warn_short(text)
+
+    def _warn_short(self, text):
+        self.lbl_msg.setText(f"⚠ 口令至少 {self.MIN_LEN} 位，当前 {len(text)} 位")
+        self.lbl_msg.setStyleSheet(f"color:{RED};")
+
+    def _on_accept(self):
+        text = self.edt_passphrase.text()
+        if len(text) < self.MIN_LEN:
+            self._warn_short(text)
+            self.edt_passphrase.setFocus()
+            return
+        self.accept()
+
+    def passphrase(self) -> str:
+        return self.edt_passphrase.text()
+
+
 class MainWindow(QMainWindow):
     def __init__(self, svc=None):
         super().__init__()
@@ -116,13 +203,16 @@ class MainWindow(QMainWindow):
             svc = FileEvidenceService(chain, state_path=config.STATE_PATH)
         self.svc = svc
         self.chain = svc.chain
-        self.uploader = cc.Signer.generate()   # 上传方身份（私钥仅存内存，不出本地）
-        self.auditor = cc.Signer.generate()    # 审计方身份
+        self._keystore = KeyStore()
+        self._account_signer = None           # 登录后从本地 KeyStore 加载/生成的账号密钥
+        self.uploader = None                  # 存证签署使用的签名者（= self._account_signer，登录后填充）
+        self.auditor = cc.Signer.generate()    # 审计方身份（演示用，可保持随机生成）
         self._file_counter = 0
         self._signed_file = None               # 最近一次签署的 (name, data)
         self._last_file_id = None
         self.tab1_file = None                  # (name, data) → (name, data, digest)
         self.tab2_file = None                  # (name, data)
+        self._last_recovered = None            # 最近一次成功解密的 (filename, plaintext_bytes)
         self._workers = []
 
         # 三重校验结果行：名称 → .ui 中的 QLabel
@@ -136,17 +226,19 @@ class MainWindow(QMainWindow):
         self.tabs.tabBar().setVisible(False)
         self.tabs.setDocumentMode(True)
         self._nav_buttons = [self.btn_nav_sign, self.btn_nav_verify,
+                             self.btn_nav_search, self.btn_nav_decrypt,
                              self.btn_nav_center, self.btn_nav_users]
         self._admin_ready = False
 
-        self._bind()
+        self._augment_ui()                     # 代码动态创建新增控件（检索 / 解密 / 导出）
+        self._bind()                           # 先有控件再绑信号
         self._reset_rows()
         self._load_history()                   # 重启后从本地快照回填历史链上存证
         self._apply_session()                  # 登录态、用户中心、权限页可见性
 
         self.log("系统就绪：模拟联盟链节点 node-A / node-B / node-C，共识确认数 2")
-        self.log(f"上传方身份已生成（私钥仅存内存），公钥指纹 {self.uploader.pubkey_fingerprint}")
         self.log(f"审计方身份已生成，公钥指纹 {self.auditor.pubkey_fingerprint}")
+        self.log("登录后将为您加载/生成专属 SM2 密钥对（本地加密存储，私钥永不入库）")
         self.log("提示：把任意文件拖入虚线框（或点击选择），自动计算 SM3 指纹")
 
     # ------------------------------------------------------------- 信号绑定
@@ -173,15 +265,123 @@ class MainWindow(QMainWindow):
         self.btn_make_admin.clicked.connect(lambda: self._change_user_role("admin"))
         self.btn_make_user.clicked.connect(lambda: self._change_user_role("user"))
 
+        # 代码动态创建的新增控件信号
+        self.btn_search.clicked.connect(self.on_search)
+        self.edt_search.returnPressed.connect(self.on_search)
+        self.tbl_search_results.doubleClicked.connect(self._on_search_double_clicked)
+        self.btn_decrypt_verify.clicked.connect(self.on_decrypt_and_verify)
+        self.edt_decrypt_passphrase.returnPressed.connect(self.on_decrypt_and_verify)
+        self.btn_pick_current.clicked.connect(self._pick_file_id_from_current)
+        self.btn_export_report.clicked.connect(self.on_export_report)
+        self.btn_save_recovered.clicked.connect(self.on_save_recovered)
+
         for lbl in (self.lbl_sign_digest, self.lbl_verify_digest, self.lbl_sign_result):
             lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
 
-        self.lbl_uploader_id.setText(f"上传方公钥指纹：{self.uploader.pubkey_fingerprint}")
+        if self.uploader is not None:
+            self.lbl_uploader_id.setText(f"上传方公钥指纹：{self.uploader.pubkey_fingerprint}")
+        else:
+            self.lbl_uploader_id.setText("上传方公钥指纹：待登录后加载账号密钥")
         self.lbl_auditor_id.setText(f"审计方公钥指纹：{self.auditor.pubkey_fingerprint}")
 
         font = self.log_box.font()
         font.setFamily("Consolas")
         self.log_box.setFont(font)
+
+    # ------------------------------------------------------- 动态扩充 GUI 控件
+    def _augment_ui(self):
+        """在 gui.ui 已新增的 tab_search / tab_decrypt 页面上，代码填充检索 / 解密 / 导出控件。"""
+
+        # --- 1) 存证检索页 ---
+        search_layout = self.tab_search.layout()
+        lbl_search_hint = QLabel(
+            "按文件名关键词 / 元数据 / SM3 指纹片段检索链上存证（结果按当前登录用户权限过滤）。"
+            "双击一行可跳转到「授权解密」页并自动填入 file_id。")
+        lbl_search_hint.setWordWrap(True)
+        lbl_search_hint.setStyleSheet(f"color:{GRAY};")
+        search_layout.addWidget(lbl_search_hint)
+
+        search_group = QGroupBox("关键词检索（文件名 / 元数据 / 指纹模糊匹配）")
+        search_group.setStyleSheet(
+            "QGroupBox { font-weight:bold; border:1px solid #3E7BFA; border-radius:6px; margin-top:10px; } "
+            "QGroupBox::title { subcontrol-origin: margin; left:10px; padding:0 4px; }")
+        v1 = QVBoxLayout()
+        h1 = QHBoxLayout()
+        h1.addWidget(QLabel("检索词："))
+        self.edt_search = QLineEdit()
+        self.edt_search.setPlaceholderText("输入文件名关键词 / SM3 指纹片段，例：采购 / pdf / 报告")
+        h1.addWidget(self.edt_search, 1)
+        self.btn_search = QPushButton("🔍 检索")
+        h1.addWidget(self.btn_search)
+        v1.addLayout(h1)
+        self.tbl_search_results = QTableWidget(0, 4)
+        self.tbl_search_results.setHorizontalHeaderLabels(["存证号", "文件名", "上传账号", "指纹(SM3)"])
+        self.tbl_search_results.horizontalHeader().setStretchLastSection(True)
+        self.tbl_search_results.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.tbl_search_results.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.tbl_search_results.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.tbl_search_results.verticalHeader().setVisible(False)
+        self.tbl_search_results.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.tbl_search_results.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.tbl_search_results.setToolTip("双击一行自动跳转到「授权解密」页并填入 file_id")
+        v1.addWidget(self.tbl_search_results)
+        search_group.setLayout(v1)
+        search_layout.addWidget(search_group, 1)
+
+        # --- 2) 授权解密与报告页 ---
+        decrypt_layout = self.tab_decrypt.layout()
+        lbl_decrypt_hint = QLabel(
+            "输入 file_id 与存证时设置的授权口令，解密还原后自动与链上 SM3 比对完成验真闭环；"
+            "「导出证据报告」以当前验真页选中的链上存证为准。")
+        lbl_decrypt_hint.setWordWrap(True)
+        lbl_decrypt_hint.setStyleSheet(f"color:{GRAY};")
+        decrypt_layout.addWidget(lbl_decrypt_hint)
+
+        decrypt_group = QGroupBox("授权解密还原（需存证口令 · PBKDF2 高强度 KDF）")
+        decrypt_group.setStyleSheet(
+            "QGroupBox { font-weight:bold; border:1px solid #21C8F6; border-radius:6px; margin-top:10px; } "
+            "QGroupBox::title { subcontrol-origin: margin; left:10px; padding:0 4px; }")
+        v2 = QVBoxLayout()
+        h2 = QHBoxLayout()
+        self.btn_pick_current = QPushButton("📌 取验真页选中存证")
+        h2.addWidget(self.btn_pick_current)
+        h2.addWidget(QLabel("file_id："))
+        self.edt_decrypt_file_id = QLineEdit()
+        self.edt_decrypt_file_id.setPlaceholderText("例：FILE-001")
+        self.edt_decrypt_file_id.setFixedWidth(140)
+        h2.addWidget(self.edt_decrypt_file_id)
+        h2.addWidget(QLabel("口令："))
+        self.edt_decrypt_passphrase = QLineEdit()
+        self.edt_decrypt_passphrase.setEchoMode(QLineEdit.Password)
+        self.edt_decrypt_passphrase.setPlaceholderText("加密时设置的口令（PBKDF2 20万次迭代）")
+        h2.addWidget(self.edt_decrypt_passphrase, 1)
+        self.btn_decrypt_verify = QPushButton("🔓 解密并验真（闭环）")
+        self.btn_decrypt_verify.setStyleSheet("background:#21C8F6; color:#02121f; font-weight:bold; padding:6px 14px;")
+        h2.addWidget(self.btn_decrypt_verify)
+        v2.addLayout(h2)
+        self.lbl_decrypt_result = QLabel("— 输入 file_id + 口令后点击按钮 —")
+        self.lbl_decrypt_result.setWordWrap(True)
+        self.lbl_decrypt_result.setStyleSheet(f"color:{GRAY}; padding:6px;")
+        self.lbl_decrypt_result.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        v2.addWidget(self.lbl_decrypt_result)
+        decrypt_group.setLayout(v2)
+        decrypt_layout.addWidget(decrypt_group, 1)
+
+        # --- 3) 保存还原明文（解密成功后可用，引导到验真页做指纹比对） ---
+        self.btn_save_recovered = QPushButton("💾 保存还原明文到本地（供验真）")
+        self.btn_save_recovered.setStyleSheet(
+            "QPushButton { background:#1DC981; color:#02121f; padding:8px 16px; border-radius:4px; font-weight:bold; } "
+            "QPushButton:hover { background:#21C8F6; } "
+            "QPushButton:disabled { background:#444; color:#888; }")
+        self.btn_save_recovered.setEnabled(False)
+        decrypt_layout.addWidget(self.btn_save_recovered)
+
+        # --- 4) 导出证据报告（独立一行） ---
+        self.btn_export_report = QPushButton("📄 导出证据报告 (.json)")
+        self.btn_export_report.setStyleSheet(
+            "QPushButton { background:#3E7BFA; color:#ffffff; padding:8px 16px; border-radius:4px; } "
+            "QPushButton:hover { background:#21C8F6; }")
+        decrypt_layout.addWidget(self.btn_export_report)
 
     # ------------------------------------------------------------- 日志/线程
     def log(self, msg: str):
@@ -215,15 +415,25 @@ class MainWindow(QMainWindow):
         if not self.tab1_file or len(self.tab1_file) < 3:
             self.log("⚠ 请先上传文件，并等待 SM3 指纹计算完成后再签署")
             return
+        if self.uploader is None:
+            self.log("⚠ 账号密钥未就绪 —— 请确认已成功登录；若密钥文件损坏请删除 ~/.xincain/keystore/ 下对应文件后重新登录")
+            return
+        # 每次签署弹出「存证授权口令」对话框；取消则中止，口令不足 6 位在弹窗内即时拦截
+        dlg = PassphraseDialog(self)
+        if dlg.exec_() != QDialog.Accepted:
+            self.log("（已取消签署：未设置存证授权口令）")
+            return
+        passphrase = dlg.passphrase()
         name, data, digest = self.tab1_file
         self._file_counter += 1
         file_id = f"FILE-{self._file_counter:03d}"
 
-        self.log("―――― 开始签署 ――――")
+        self.log("―――― 开始签署（使用当前登录账号 SM2 密钥 + PBKDF2 口令加密原文）――――")
         self.log(f"① SM3 指纹（原文不上链）：{digest}")
+        self.log(f"①-2 签名主体（账号公钥指纹）：{self.uploader.pubkey_fingerprint}")
 
         receipt = self.svc.submit_file(
-            file_id, name, data, self.uploader, "demo-pass",
+            file_id, name, data, self.uploader, passphrase,
             meta={"文件名": name, "大小": f"{len(data):,} 字节"},
         )["receipt"]
         ev_no = receipt["evidence_no"]
@@ -284,17 +494,22 @@ class MainWindow(QMainWindow):
     # --------------------------------------------- 页面导航 / 登录态
     def _goto_page(self, index: int):
         """跳转页面：整页覆盖显示，不做多标签并列。"""
-        if index == 3 and self.btn_nav_users.isHidden():
+        if index == 5 and self.btn_nav_users.isHidden():
             return
         self.tabs.setCurrentIndex(index)
         for i, btn in enumerate(self._nav_buttons):
             btn.setChecked(i == index)
 
-    def _apply_session(self, announce=True):
-        """把当前登录用户同步到标题、导航栏与用户中心，并控制权限页可见性。"""
+    def _apply_session(self, announce=True, password=None):
+        """把当前登录用户同步到标题、导航栏、账号密钥、用户中心与权限页可见性。"""
         user = self.svc.current_user()
         if not user:
+            # 登出态：清空账号密钥与 uploader
+            self._account_signer = None
+            self.uploader = None
+            self.lbl_uploader_id.setText("上传方公钥指纹：待登录后加载账号密钥")
             return
+
         role = ROLE_NAMES.get(user["role"], user["role"])
         self.setWindowTitle(f"信链 · 国密电子文件存证系统 · {user['display_name']}")
         self.lbl_nav_user.setText(f"{user['username']} · {role}")
@@ -305,12 +520,33 @@ class MainWindow(QMainWindow):
         created = (user.get("created_at") or "").replace("T", " ")[:19]
         self.lbl_center_created.setText(created or "—")
 
+        # 加载 / 生成本地账号密钥（password 由 LoginDialog 登录成功时传入）
+        if password and self._account_signer is None:
+            try:
+                self._account_signer = self._keystore.load_or_generate(user["username"], password)
+                self.uploader = self._account_signer
+                self.lbl_uploader_id.setText(
+                    f"上传方公钥指纹：{self.uploader.pubkey_fingerprint}（账号 {user['username']}）")
+                self.log(
+                    f"🔐 已为账号 [{user['username']}] {'加载' if self._keystore.exists(user['username']) else '生成'} "
+                    f"专属 SM2 密钥对（本地加密文件：{self._keystore._path(user['username'])}，"
+                    f"公钥指纹 {self._account_signer.pubkey_fingerprint}）"
+                )
+            except ValueError as exc:
+                self.log(f"⚠ 账号密钥加载失败：{exc}；存证将无法使用本账号签名")
+                self._account_signer = None
+                self.uploader = None
+        elif self._account_signer is not None:
+            self.uploader = self._account_signer
+            self.lbl_uploader_id.setText(
+                f"上传方公钥指纹：{self.uploader.pubkey_fingerprint}（账号 {user['username']}）")
+
         is_super = user["role"] == "superadmin"
         self.btn_nav_users.setVisible(is_super)
         if is_super:
             self._setup_user_admin()
             self._refresh_users()
-        elif self.tabs.currentIndex() == 3:
+        elif self.tabs.currentIndex() == 5:
             self._goto_page(0)
 
         self._clear_pwd_fields()
@@ -365,7 +601,7 @@ class MainWindow(QMainWindow):
         if dlg.exec_() != QDialog.Accepted:
             self.close()
             return
-        self._apply_session()
+        self._apply_session(password=dlg._last_password)
         self._goto_page(0)
 
     # --------------------------------------------- 用户权限管理（仅超级管理员）
@@ -543,6 +779,174 @@ class MainWindow(QMainWindow):
         self.lbl_conclusion.setText("🛡 攻击被拦截：伪造签名无法通过真实上传方公钥验签 —— 不可否认性有效")
         self.lbl_conclusion.setStyleSheet("font-weight:bold; font-size:15px;")
 
+    # ---------------------------------------------- 关键词检索（P0-2 + P0-5 方案 B）
+    def on_search(self):
+        query = self.edt_search.text().strip()
+        self.tbl_search_results.setRowCount(0)
+        if not query:
+            self.log("⚠ 请输入检索关键词（文件名 / 元数据 / SM3 指纹片段）")
+            return
+        self.log(f"🔍 关键词检索：「{query}」（按当前登录用户权限过滤）")
+        try:
+            results = self.svc.search_evidence(query)
+        except Exception as exc:
+            self.log(f"✖ 检索失败：{type(exc).__name__}: {exc}")
+            return
+        self.tbl_search_results.setRowCount(len(results))
+        for row, r in enumerate(results):
+            item0 = QTableWidgetItem(short(r.get("evidence_no") or "", 14, 6))
+            item0.setData(Qt.UserRole, r)
+            self.tbl_search_results.setItem(row, 0, item0)
+            self.tbl_search_results.setItem(row, 1, QTableWidgetItem(r.get("file_name") or r.get("file_id") or ""))
+            self.tbl_search_results.setItem(row, 2, QTableWidgetItem(r.get("uploader_username") or "（未登录匿名存证）"))
+            self.tbl_search_results.setItem(row, 3, QTableWidgetItem(short(r.get("file_sha256") or "", 14, 6)))
+        self.log(f"检索完成，命中 {len(results)} 条；双击一行可自动填入解密区")
+
+    def _on_search_double_clicked(self, index):
+        row = index.row()
+        if row < 0 or row >= self.tbl_search_results.rowCount():
+            return
+        item = self.tbl_search_results.item(row, 0)
+        data = item.data(Qt.UserRole) if item else None
+        if not data:
+            return
+        file_id = data.get("file_id") or ""
+        self.edt_decrypt_file_id.setText(file_id)
+        ev_no = data.get("evidence_no") or ""
+        self._goto_page(3)                     # 跳到「授权解密」页，便于直接输入口令
+        self.log(f"📌 从检索结果取 file_id={file_id}（ev_no={short(ev_no, 12, 6)}），请输入解密口令")
+
+    # ------------------------------------------- 授权解密还原 → 验真闭环（P0-1 + P0-4）
+    def _pick_file_id_from_current(self):
+        """从验真页选中的存证（cmb_evidence）反查链上 file_id，填入解密区。"""
+        ev_no = self.cmb_evidence.currentData()
+        if not ev_no:
+            self.log("⚠ 验真页未选中任何存证")
+            return
+        on_chain = self.chain.query_evidence(ev_no)
+        if not on_chain:
+            self.log(f"⚠ 链上找不到存证 {short(ev_no, 12, 6)}")
+            return
+        extra = on_chain["transaction"].get("extra") or ""
+        file_id, _, _ = extra.partition("|")
+        self.edt_decrypt_file_id.setText(file_id)
+        self.log(f"📌 从链上存证 {short(ev_no, 12, 6)} 解析到 file_id={file_id}")
+
+    def on_decrypt_and_verify(self):
+        file_id = self.edt_decrypt_file_id.text().strip()
+        passphrase = self.edt_decrypt_passphrase.text()
+        if not file_id or not passphrase:
+            self.log("⚠ 请先填写 file_id 和存证口令")
+            return
+        self.log(f"🔓 开始解密并验真闭环：file_id={file_id} ...（后台执行，不卡界面）")
+        self.btn_decrypt_verify.setEnabled(False)
+
+        def _do():
+            return self.svc.decrypt_and_verify(file_id, passphrase)
+
+        def _done(result):
+            self.btn_decrypt_verify.setEnabled(True)
+            if not result.get("ok"):
+                msg = result.get("error", "未知错误")
+                self.lbl_decrypt_result.setText(f"❌ 解密失败：{msg}")
+                self.lbl_decrypt_result.setStyleSheet("color:#E8463A; padding:6px;")
+                self.log(f"✖ 解密失败：{msg}")
+                self._last_recovered = None
+                self.btn_save_recovered.setEnabled(False)
+                return
+            # 解密成功，保存明文供后续验真
+            filename = result.get("filename", file_id)
+            plaintext = result.get("decrypted")
+            self._last_recovered = (filename, plaintext)
+            self.btn_save_recovered.setEnabled(True)
+            # 展示闭环验真结论
+            size = result.get("size", 0)
+            local = result.get("local_digest", "")
+            chain = result.get("chain_digest", "")
+            verified = result.get("verified", False)
+            ev_no = result.get("evidence_no", "")
+            if verified:
+                color = GREEN
+                verdict = "🎉 验真通过"
+                hint = f"解密还原成功（{size:,} 字节）+ SM3 与链上存证完全一致 → 还原的就是被存证的原始文件"
+            else:
+                color = RED
+                verdict = "⚠ 解密成功但 SM3 不匹配"
+                hint = f"解密还原成功（{size:,} 字节）但与链上 SM3 不同：密文可能被篡改，{result.get('error', '')}"
+            self.lbl_decrypt_result.setText(
+                f"<b>{verdict}</b> — {hint}\n"
+                f"文件：{filename} ({size:,} 字节)\n"
+                f"还原后 SM3 ：<span style='color:{GREEN if verified else RED};'>{local}</span>\n"
+                f"链上 SM3   ：{chain}\n"
+                f"链上存证号 ：{ev_no}\n"
+                f"→ 可点击「保存还原明文到本地」，再到「验真溯源」页载入该文件做指纹比对"
+            )
+            self.lbl_decrypt_result.setStyleSheet(f"color:{color}; padding:6px;")
+            self.log(f"🔓 {verdict}：{filename} 解密 {size:,} 字节，"
+                     f"链上存证号 {short(ev_no, 12, 6) if ev_no else '—'}")
+            # 自动弹「另存为」对话框，引导保存明文
+            self._save_recovered_interactive(auto=True)
+
+        self._start_worker(_do, _done)
+
+    def _save_recovered_interactive(self, auto: bool = False):
+        """把最近一次解密成功的明文保存到本地；auto=True 表示解密成功后自动触发。"""
+        if not self._last_recovered:
+            self.log("⚠ 暂无已解密的明文可保存")
+            return
+        filename, data = self._last_recovered
+        suggested = filename or "recovered.bin"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "保存还原明文", suggested, "所有文件 (*)")
+        if not path:
+            self.log("（已取消保存明文）" if auto else "（用户取消保存明文）")
+            return
+        try:
+            saved = self.svc.save_recovered_file(filename, data, target_path=path)
+        except OSError as exc:
+            self.log(f"✖ 保存明文失败：{exc}")
+            return
+        self.log(f"✅ 明文已保存至：{saved}（{len(data):,} 字节）")
+        self.log("   提示：可到「验真溯源」页载入该文件，重算 SM3 与链上指纹比对")
+        self.lbl_decrypt_result.setText(
+            self.lbl_decrypt_result.text() +
+            f"\n💾 明文已保存：{saved}"
+        )
+
+    def on_save_recovered(self):
+        """按钮触发：保存最近一次解密成功的明文。"""
+        self._save_recovered_interactive(auto=False)
+
+    # ------------------------------------------------ 导出证据报告（P0-3）
+    def on_export_report(self):
+        ev_no = self.cmb_evidence.currentData()
+        if not ev_no:
+            self.log("⚠ 请先在「验真溯源」页选中一个链上存证（cmb_evidence 下拉框）")
+            return
+        self.log(f"📄 生成证据报告：{short(ev_no, 12, 6)} ...")
+        try:
+            report = self.svc.evidence_report(ev_no)
+        except ValueError as exc:
+            self.log(f"✖ 报告生成失败：{exc}")
+            return
+
+        suggested = f"evidence_{ev_no[:12]}.json"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "导出证据报告", suggested, "JSON 文件 (*.json);;所有文件 (*)")
+        if not path:
+            self.log("（用户取消保存）")
+            return
+
+        import json as _json
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                _json.dump(report, f, ensure_ascii=False, indent=2)
+        except OSError as exc:
+            self.log(f"✖ 写入文件失败：{exc}")
+            return
+        self.log(f"✅ 证据报告已保存：{path}")
+        self.log(f"   含字段：存证编号 / 文件指纹 / 存证主体 / 签名值 / 区块高度 / 区块哈希 / 出块节点 / 存证时间 / 共识确认数")
+
 
 def main():
     # Windows 缩放屏下启用高分屏适配，避免界面模糊（须在 QApplication 之前设置）
@@ -564,6 +968,7 @@ def main():
 
     win = MainWindow(svc)
     win.show()
+    win._apply_session(password=login._last_password)  # 加载账号密钥（首次登录自动生成，后续登录自动加载）
     sys.exit(app.exec_())
 
 

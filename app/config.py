@@ -33,3 +33,14 @@ DATABASE_ECHO = os.environ.get("CONTRACT_CHAIN_DATABASE_ECHO", "0") == "1"
 STATE_PATH = os.environ.get(
     "CONTRACT_CHAIN_STATE_PATH", os.path.join(BASE_DIR, "evidence_state.json")
 )
+
+# 密文文件服务器：SM4 加密后的密文 C 以独立 .enc 文件落盘于此（不进业务库、不落原文 / 私钥 / 会话密钥）。
+# 接收方凭 file_id + 授权口令从此目录读取密文 C 并解密还原。可用环境变量覆盖（测试 / 多实例隔离）。
+CIPHER_STORE_DIR = os.environ.get(
+    "CONTRACT_CHAIN_CIPHER_STORE_DIR", os.path.join(BASE_DIR, "cipher_store")
+)
+
+# 授权解密后还原的明文默认保存目录（用户可在「另存为」对话框中改到任意路径）。
+RECOVERED_DIR = os.environ.get(
+    "CONTRACT_CHAIN_RECOVERED_DIR", os.path.join(BASE_DIR, "recovered")
+)

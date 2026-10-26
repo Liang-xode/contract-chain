@@ -48,6 +48,8 @@ class _BasePersistTest(unittest.TestCase):
 
     def setUp(self):
         self._tmpdir = tempfile.mkdtemp(prefix="cc_persist_")
+        # 隔离密文文件服务器，避免污染项目根目录
+        os.environ["CONTRACT_CHAIN_CIPHER_STORE_DIR"] = os.path.join(self._tmpdir, "cipher_store")
         self._db_path = os.path.join(self._tmpdir, "test_evidence.db").replace("\\", "/")
         self.engine = build_engine("sqlite:///" + self._db_path)
         Base.metadata.create_all(bind=self.engine)

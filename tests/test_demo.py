@@ -11,6 +11,7 @@ tests/test_demo.py —— 核心功能自动化测试
 import sys
 import os
 import time
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -75,6 +76,9 @@ class TestBusinessFlow(unittest.TestCase):
     """完整业务闭环 + 三重攻击检测"""
 
     def setUp(self):
+        self._tmpdir = tempfile.mkdtemp(prefix="cc_demo_")
+        # 隔离密文文件服务器，避免污染项目根目录
+        os.environ["CONTRACT_CHAIN_CIPHER_STORE_DIR"] = os.path.join(self._tmpdir, "cipher_store")
         self.chain = EvidenceChain()
         self.svc = FileEvidenceService(self.chain)
         self.uploader = cc.Signer.generate()

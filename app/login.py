@@ -52,6 +52,7 @@ class LoginDialog(QDialog):
 
         self.svc = svc
         self.user = None
+        self._last_password = None        # 登录成功时的口令，供主窗口加载本地密钥文件用
         self._bind()
         self._show_login_page()
         self.edt_user.setFocus()
@@ -125,6 +126,7 @@ class LoginDialog(QDialog):
         except Exception as exc:          # 数据库等异常兜底
             self._set_msg(self.lbl_login_msg, f"登录失败：{type(exc).__name__}: {exc}")
         else:
+            self._last_password = password   # 登录成功后保存口令，主窗口用它解锁本地密钥文件
             self.accept()
         finally:
             QApplication.restoreOverrideCursor()

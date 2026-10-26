@@ -34,3 +34,5 @@ contract-chain-env.tar.gz
 Thumbs.db
 Desktop.ini
 .DS_Store
+cipher_store/FILE-003.enc
+cipher_store/FILE-004.enc

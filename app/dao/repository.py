@@ -166,14 +166,15 @@ class EvidenceRepository(_BaseRepository):
     """
 
     def save_evidence(self, file_sha256, file_name, signer_pubkey, signature,
-                      chain_hash, semantic_index=None, uploader_id=None) -> Evidence:
-        """写入一条存证记录（只存指纹 / 公钥 / 签名 / 链哈希 / 语义索引，绝不含原文与私钥）。"""
+                      chain_hash, semantic_index=None, uploader_id=None,
+                      cipher_path=None) -> Evidence:
+        """写入一条存证记录（只存指纹 / 公钥 / 签名 / 链哈希 / 语义索引 / 密文路径，绝不含原文与私钥）。"""
         with self._session() as s:
             record = Evidence(
                 file_sha256=file_sha256, file_name=file_name,
                 signer_pubkey=signer_pubkey, signature=signature,
                 chain_hash=chain_hash, semantic_index=semantic_index,
-                uploader_id=uploader_id,
+                uploader_id=uploader_id, cipher_path=cipher_path,
             )
             s.add(record)
             s.commit()

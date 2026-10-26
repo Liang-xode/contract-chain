@@ -71,6 +71,7 @@ class Evidence(Base):
     signature = Column(String(256), nullable=False)                # SM2 签名（hex）
     chain_hash = Column(String(64), nullable=False)                # 链上区块哈希
     semantic_index = Column(Text, nullable=True)                   # AI 语义索引（可空，现为关键词索引）
+    cipher_path = Column(String(512), nullable=True, index=True)    # 密文 C 在本机文件服务器的路径（非原文；可空以兼容历史）
     uploader_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
     created_at = Column(DateTime, nullable=False, default=_now)
 

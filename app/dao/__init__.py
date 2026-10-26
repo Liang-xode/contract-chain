@@ -18,6 +18,7 @@ from app.dao.repository import (
     UserRepository,
 )
 from app.dao.state_store import StateStore
+from app.dao.cipher_store import CipherStore
 
 __all__ = [
     "build_engine",
@@ -30,4 +31,5 @@ __all__ = [
     "EvidenceRepository",
     "SignerRepository",
     "StateStore",
+    "CipherStore",
 ]

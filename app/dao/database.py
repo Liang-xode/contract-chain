@@ -13,7 +13,7 @@ database.py —— 引擎 / 会话工厂 / 自动建表
 
 import os
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker
 
 from app import config
@@ -55,9 +55,25 @@ def get_engine():
 
 
 def init_db():
-    """创建全部表（已存在则跳过）。"""
-    Base.metadata.create_all(bind=get_engine())
+    """创建全部表（已存在则跳过），并执行轻量级 schema 迁移（补列）。"""
+    engine = get_engine()
+    Base.metadata.create_all(bind=engine)
+    _migrate_schema(engine)
     return True
+
+
+def _migrate_schema(engine):
+    """
+    轻量级迁移：对已存在的旧表补列（不动数据，保证向前兼容）。
+    当前仅处理 evidence.cipher_path（密文文件服务器路径，可空）。
+    """
+    insp = inspect(engine)
+    if "evidence" not in insp.get_table_names():
+        return
+    cols = {c["name"] for c in insp.get_columns("evidence")}
+    if "cipher_path" not in cols:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE evidence ADD COLUMN cipher_path VARCHAR(512)"))
 
 
 def get_session_factory():
