@@ -9,6 +9,15 @@ build/
 dist/
 .pytest_cache/
 
+# 本地数据库文件（SQLite 存证库，运行时生成，不入库）
+*.db
+*.sqlite
+*.sqlite3
+
+# 本地链状态快照（区块链本体 + 密文，运行时生成，不入库）
+evidence_state.json
+evidence_state.json.tmp
+
 # 虚拟环境
 .venv/
 venv/
@@ -25,3 +34,5 @@ contract-chain-env.tar.gz
 Thumbs.db
 Desktop.ini
 .DS_Store
+cipher_store/FILE-003.enc
+cipher_store/FILE-004.enc
