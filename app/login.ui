@@ -1,0 +1,473 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>LoginDialog</class>
+ <widget class="QDialog" name="LoginDialog">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>980</width>
+    <height>600</height>
+   </rect>
+  </property>
+  <property name="minimumSize">
+   <size>
+    <width>880</width>
+    <height>540</height>
+   </size>
+  </property>
+  <property name="windowTitle">
+   <string>信链 · 安全登录</string>
+  </property>
+  <layout class="QHBoxLayout" name="rootLayout">
+   <property name="leftMargin">
+    <number>34</number>
+   </property>
+   <property name="topMargin">
+    <number>30</number>
+   </property>
+   <property name="rightMargin">
+    <number>30</number>
+   </property>
+   <property name="bottomMargin">
+    <number>30</number>
+   </property>
+   <property name="spacing">
+    <number>0</number>
+   </property>
+   <item>
+    <spacer name="left_spacer">
+     <property name="orientation">
+      <enum>Qt::Horizontal</enum>
+     </property>
+     <property name="sizeHint" stdset="0">
+      <size>
+       <width>40</width>
+       <height>20</height>
+      </size>
+     </property>
+    </spacer>
+   </item>
+   <item>
+    <widget class="QFrame" name="card">
+     <property name="minimumSize">
+      <size>
+       <width>360</width>
+       <height>0</height>
+      </size>
+     </property>
+     <property name="maximumSize">
+      <size>
+       <width>390</width>
+       <height>16777215</height>
+      </size>
+     </property>
+     <property name="sizePolicy">
+      <sizepolicy hsizetype="Fixed" vsizetype="Expanding">
+       <horstretch>0</horstretch>
+       <verstretch>0</verstretch>
+      </sizepolicy>
+     </property>
+     <property name="frameShape">
+      <enum>QFrame::NoFrame</enum>
+     </property>
+     <property name="styleSheet">
+      <string notr="true">QFrame#card {
+    background-color: rgba(6, 16, 38, 205);
+    border: 1px solid rgba(72, 198, 255, 110);
+    border-radius: 18px;
+}
+QFrame#card QLabel {
+    color: #C9E6FA;
+    background: transparent;
+}
+QFrame#card QLabel#lbl_brand {
+    color: #49D8FF;
+    font-weight: bold;
+    font-size: 11px;
+}
+QFrame#card QLabel#lbl_title {
+    color: #FFFFFF;
+    font-size: 22px;
+    font-weight: bold;
+}
+QFrame#card QLabel#lbl_sub {
+    color: #8FB6D2;
+    font-size: 12px;
+}
+QFrame#card QLineEdit {
+    background-color: rgba(255, 255, 255, 16);
+    border: 1px solid rgba(105, 190, 240, 90);
+    border-radius: 8px;
+    padding: 7px 10px;
+    color: #EAF7FF;
+    selection-background-color: #1B78C8;
+}
+QFrame#card QLineEdit:focus {
+    border: 1px solid #49D8FF;
+    background-color: rgba(255, 255, 255, 28);
+}
+QFrame#card QPushButton#btn_login {
+    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #21C8F6, stop:1 #3E7BFA);
+    border: none;
+    border-radius: 9px;
+    color: #02121F;
+    font-weight: bold;
+    font-size: 14px;
+}
+QFrame#card QPushButton#btn_login:hover {
+    background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #55DCFF, stop:1 #5E93FF);
+}
+QFrame#card QPushButton#btn_login:pressed {
+    background-color: #1587C8;
+}
+QFrame#card QPushButton#btn_login:disabled {
+    background-color: rgba(70, 110, 150, 120);
+    color: rgba(255, 255, 255, 120);
+}
+QFrame#card QPushButton#btn_do_register {
+    background-color: rgba(33, 200, 246, 40);
+    border: 1px solid rgba(73, 216, 255, 120);
+    border-radius: 9px;
+    color: #BDF0FF;
+    font-weight: bold;
+}
+QFrame#card QPushButton#btn_do_register:hover {
+    background-color: rgba(33, 200, 246, 75);
+}
+QFrame#card QPushButton#btn_to_register, QFrame#card QPushButton#btn_back,
+QFrame#card QPushButton#btn_quit {
+    border: none;
+    color: #7FDBFF;
+    background: transparent;
+}
+QFrame#card QPushButton#btn_to_register:hover, QFrame#card QPushButton#btn_back:hover {
+    color: #FFFFFF;
+}
+QFrame#card QPushButton#btn_quit {
+    color: #7C93A8;
+}</string>
+     </property>
+     <layout class="QVBoxLayout" name="cardLayout">
+      <property name="leftMargin">
+       <number>26</number>
+      </property>
+      <property name="topMargin">
+       <number>24</number>
+      </property>
+      <property name="rightMargin">
+       <number>26</number>
+      </property>
+      <property name="bottomMargin">
+       <number>18</number>
+      </property>
+      <property name="spacing">
+       <number>6</number>
+      </property>
+      <item>
+       <widget class="QLabel" name="lbl_brand">
+        <property name="text">
+         <string>XINCHAIN · TRUSTED EVIDENCE</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QLabel" name="lbl_title">
+        <property name="text">
+         <string>安全登录</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QLabel" name="lbl_sub">
+        <property name="text">
+         <string>国密算法 · 联盟链共识 · 可信存证</string>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QStackedWidget" name="stack">
+        <property name="currentIndex">
+         <number>0</number>
+        </property>
+        <widget class="QWidget" name="page_login">
+         <layout class="QVBoxLayout" name="loginLayout">
+          <property name="leftMargin">
+           <number>0</number>
+          </property>
+          <property name="topMargin">
+           <number>10</number>
+          </property>
+          <property name="rightMargin">
+           <number>0</number>
+          </property>
+          <property name="bottomMargin">
+           <number>0</number>
+          </property>
+          <property name="spacing">
+           <number>7</number>
+          </property>
+          <item>
+           <widget class="QLabel" name="lbl_user">
+            <property name="text">
+             <string>用户名</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QLineEdit" name="edt_user">
+            <property name="minimumSize">
+             <size>
+              <width>0</width>
+              <height>34</height>
+             </size>
+            </property>
+            <property name="placeholderText">
+             <string>请输入用户名</string>
+            </property>
+            <property name="clearButtonEnabled">
+             <bool>true</bool>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QLabel" name="lbl_pwd">
+            <property name="text">
+             <string>密码</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QLineEdit" name="edt_pwd">
+            <property name="minimumSize">
+             <size>
+              <width>0</width>
+              <height>34</height>
+             </size>
+            </property>
+            <property name="echoMode">
+             <enum>QLineEdit::Password</enum>
+            </property>
+            <property name="placeholderText">
+             <string>请输入密码</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QLabel" name="lbl_login_msg">
+            <property name="minimumSize">
+             <size>
+              <width>0</width>
+              <height>20</height>
+             </size>
+            </property>
+            <property name="styleSheet">
+             <string notr="true">color: #FF6B5E;</string>
+            </property>
+            <property name="text">
+             <string/>
+            </property>
+            <property name="wordWrap">
+             <bool>true</bool>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QPushButton" name="btn_login">
+            <property name="minimumSize">
+             <size>
+              <width>0</width>
+              <height>38</height>
+             </size>
+            </property>
+            <property name="text">
+             <string>登 录</string>
+            </property>
+            <property name="default">
+             <bool>true</bool>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QPushButton" name="btn_to_register">
+            <property name="text">
+             <string>首次使用？注册新账号</string>
+            </property>
+            <property name="flat">
+             <bool>true</bool>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </widget>
+        <widget class="QWidget" name="page_register">
+         <layout class="QVBoxLayout" name="registerLayout">
+          <property name="leftMargin">
+           <number>0</number>
+          </property>
+          <property name="topMargin">
+           <number>6</number>
+          </property>
+          <property name="rightMargin">
+           <number>0</number>
+          </property>
+          <property name="bottomMargin">
+           <number>0</number>
+          </property>
+          <property name="spacing">
+           <number>6</number>
+          </property>
+          <item>
+           <widget class="QLabel" name="lbl_reg_title">
+            <property name="styleSheet">
+             <string notr="true">color: #8FB6D2;</string>
+            </property>
+            <property name="text">
+             <string>注册后为普通用户；口令以 PBKDF2 加盐哈希保存，不存明文</string>
+            </property>
+            <property name="wordWrap">
+             <bool>true</bool>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QLineEdit" name="edt_reg_user">
+            <property name="minimumSize">
+             <size>
+              <width>0</width>
+              <height>32</height>
+             </size>
+            </property>
+            <property name="placeholderText">
+             <string>用户名（不超过 64 个字符）</string>
+            </property>
+            <property name="clearButtonEnabled">
+             <bool>true</bool>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QLineEdit" name="edt_reg_pwd">
+            <property name="minimumSize">
+             <size>
+              <width>0</width>
+              <height>32</height>
+             </size>
+            </property>
+            <property name="echoMode">
+             <enum>QLineEdit::Password</enum>
+            </property>
+            <property name="placeholderText">
+             <string>密码</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QLineEdit" name="edt_reg_pwd2">
+            <property name="minimumSize">
+             <size>
+              <width>0</width>
+              <height>32</height>
+             </size>
+            </property>
+            <property name="echoMode">
+             <enum>QLineEdit::Password</enum>
+            </property>
+            <property name="placeholderText">
+             <string>确认密码</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QLabel" name="lbl_register_msg">
+            <property name="minimumSize">
+             <size>
+              <width>0</width>
+              <height>20</height>
+             </size>
+            </property>
+            <property name="styleSheet">
+             <string notr="true">color: #FF6B5E;</string>
+            </property>
+            <property name="text">
+             <string/>
+            </property>
+            <property name="wordWrap">
+             <bool>true</bool>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QPushButton" name="btn_do_register">
+            <property name="minimumSize">
+             <size>
+              <width>0</width>
+              <height>34</height>
+             </size>
+            </property>
+            <property name="text">
+             <string>注 册</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QPushButton" name="btn_back">
+            <property name="text">
+             <string>返回登录</string>
+            </property>
+            <property name="flat">
+             <bool>true</bool>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </widget>
+       </widget>
+      </item>
+      <item>
+       <spacer name="card_spacer">
+        <property name="orientation">
+         <enum>Qt::Vertical</enum>
+        </property>
+        <property name="sizeHint" stdset="0">
+         <size>
+          <width>20</width>
+          <height>20</height>
+         </size>
+        </property>
+       </spacer>
+      </item>
+      <item>
+       <widget class="QLabel" name="lbl_tip">
+        <property name="styleSheet">
+         <string notr="true">color: #6E879B;</string>
+        </property>
+        <property name="text">
+         <string>会话令牌本地保存，登出即吊销</string>
+        </property>
+        <property name="alignment">
+         <set>Qt::AlignCenter</set>
+        </property>
+        <property name="wordWrap">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+      <item>
+       <widget class="QPushButton" name="btn_quit">
+        <property name="text">
+         <string>退出系统</string>
+        </property>
+        <property name="flat">
+         <bool>true</bool>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+  </layout>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>

@@ -213,6 +213,72 @@ class TestOwnership(_BasePersistTest):
 
 
 # --------------------------------------------------------------------------- #
+# ④-2 超级管理员：调整普通用户 / 管理员角色
+# --------------------------------------------------------------------------- #
+class TestSuperAdmin(_BasePersistTest):
+    def test_only_superadmin_can_change_user_roles(self):
+        self.svc.register_user("root", ADMIN_PASS, role="superadmin")
+        self.svc.register_user("alice", USER_PASS)
+        self.svc.register_user("ops", USER_PASS, role="admin")
+
+        # 普通用户 / 管理员无权查看用户列表或改角色
+        with self.assertRaises(PermissionError):
+            self.svc.list_users(actor="alice")
+        with self.assertRaises(PermissionError):
+            self.svc.set_user_role("alice", "admin", actor="ops")
+
+        # 超级管理员可查看列表并升 / 降角色
+        users = self.svc.list_users(actor="root")
+        self.assertTrue(any(u["username"] == "alice" for u in users))
+        self.assertEqual(self.svc.set_user_role("alice", "admin", actor="root")["role"], "admin")
+        self.assertEqual(self.svc.set_user_role("ops", "user", actor="root")["role"], "user")
+
+        # 超级管理员账号受保护；不允许再创建第二个超级管理员
+        with self.assertRaises(ValueError):
+            self.svc.set_user_role("root", "user", actor="root")
+        with self.assertRaises(ValueError):
+            self.svc.set_user_role("alice", "superadmin", actor="root")
+
+    def test_superadmin_sees_all_evidence(self):
+        uploader = cc.Signer.generate()
+        self.svc.register_user("root", ADMIN_PASS, role="superadmin")
+        self.svc.register_user("alice", USER_PASS)
+        self.svc.login("alice", USER_PASS)
+        self.svc.submit_file("A1", "a.pdf", b"alice file", uploader, "p")
+        self.svc.logout()
+        self.assertEqual(self.svc.count_evidence(actor="root"), 1)
+
+
+# --------------------------------------------------------------------------- #
+# ④-3 用户中心：修改密码
+# --------------------------------------------------------------------------- #
+class TestChangePassword(_BasePersistTest):
+    def test_change_password_requires_old_and_rehashes(self):
+        self.svc.register_user("alice", USER_PASS)
+        self.svc.login("alice", USER_PASS)
+
+        with self.assertRaises(ValueError):
+            self.svc.change_password("wrong-old", "NewPass#2026")
+        with self.assertRaises(ValueError):
+            self.svc.change_password(USER_PASS, "123")
+
+        user_before = self.svc.users.find_by_username("alice")
+        old_hash, old_salt = user_before.password_hash, user_before.salt
+
+        self.assertTrue(self.svc.change_password(USER_PASS, "NewPass#2026"))
+        user_after = self.svc.users.find_by_username("alice")
+
+        # 新密码可登录，旧密码失效；哈希与随机盐均已更换且仍非明文
+        self.svc.logout()
+        with self.assertRaises(ValueError):
+            self.svc.login("alice", USER_PASS)
+        self.svc.login("alice", "NewPass#2026")
+        self.assertNotEqual(old_hash, user_after.password_hash)
+        self.assertNotEqual(old_salt, user_after.salt)
+        self.assertNotIn("NewPass#2026", user_after.password_hash)
+
+
+# --------------------------------------------------------------------------- #
 # ⑤ 可切 MySQL（换连接串即可）
 # --------------------------------------------------------------------------- #
 class TestMySQLSwitchable(unittest.TestCase):

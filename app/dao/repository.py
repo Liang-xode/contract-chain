@@ -87,6 +87,37 @@ class UserRepository(_BaseRepository):
             s.commit()
             return True
 
+    def set_role(self, username_or_id, role) -> bool:
+        """修改账号角色（普通用户 / 管理员）。权限校验由业务层负责。"""
+        with self._session() as s:
+            if isinstance(username_or_id, str):
+                q = s.query(User).filter(User.username == username_or_id)
+            else:
+                q = s.query(User).filter(User.id == username_or_id)
+            user = q.first()
+            if not user:
+                return False
+            user.role = role
+            user.updated_at = _now()
+            s.commit()
+            return True
+
+    def update_password(self, username_or_id, password_hash, salt) -> bool:
+        """更新口令的加盐哈希（业务层校验原密码后调用）。"""
+        with self._session() as s:
+            if isinstance(username_or_id, str):
+                q = s.query(User).filter(User.username == username_or_id)
+            else:
+                q = s.query(User).filter(User.id == username_or_id)
+            user = q.first()
+            if not user:
+                return False
+            user.password_hash = password_hash
+            user.salt = salt
+            user.updated_at = _now()
+            s.commit()
+            return True
+
     def list_all(self):
         with self._session() as s:
             return s.query(User).order_by(User.id).all()

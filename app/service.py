@@ -33,6 +33,10 @@ from app.dao import (
     UserRepository,
     get_session_factory,
 )
+from app.dao.security import hash_password, verify_password
+
+# 可查看全部存证的角色（超级管理员拥有与管理员相同的存证查看范围）
+PRIVILEGED_ROLES = ("admin", "superadmin")
 
 
 def gen_evidence_no(file_digest: str, signer_fp: str, ts: float) -> str:
@@ -266,9 +270,47 @@ class FileEvidenceService:
         """当前登录用户（未登录返回 None）。"""
         return self._user_dto(self._current_user) if self._current_user else None
 
+    def change_password(self, old_password: str, new_password: str) -> bool:
+        """登录用户修改口令：先校验原密码，再以新的随机盐重新做 PBKDF2 哈希。"""
+        if self._current_user is None:
+            raise PermissionError("请先登录后再修改密码")
+        if not new_password or len(new_password) < 6:
+            raise ValueError("新密码至少 6 位")
+        user = self.users.find_by_username(self._current_user.username)
+        if user is None:
+            raise ValueError("用户不存在")
+        if not verify_password(old_password, user.password_hash, user.salt):
+            raise ValueError("原密码不正确")
+        password_hash, salt = hash_password(new_password)
+        self.users.update_password(user.username, password_hash, salt)
+        self._current_user = self.users.find_by_username(user.username)
+        return True
+
     def set_user_status(self, username: str, status: str) -> bool:
         """管理员启用 / 禁用账号。"""
         return self.users.set_status(username, status)
+
+    def list_users(self, actor=None) -> list:
+        """用户列表：仅超级管理员可查看。"""
+        user = self._actor(actor)
+        if user is None or user.role != "superadmin":
+            raise PermissionError("仅超级管理员可查看用户列表")
+        return [self._user_dto(u) for u in self.users.list_all()]
+
+    def set_user_role(self, username: str, role: str, actor=None) -> dict:
+        """调整普通用户 / 管理员的角色：仅超级管理员可操作，超级管理员账号受保护。"""
+        user = self._actor(actor)
+        if user is None or user.role != "superadmin":
+            raise PermissionError("仅超级管理员可修改用户权限")
+        if role not in ("user", "admin"):
+            raise ValueError(f"不支持的角色：{role}")
+        target = self.users.find_by_username(username)
+        if target is None:
+            raise ValueError(f"用户不存在：{username}")
+        if target.role == "superadmin":
+            raise ValueError("超级管理员账号不可修改")
+        self.users.set_role(username, role)
+        return self._user_dto(self.users.find_by_username(username))
 
     # ---------- 权限归属查询：管理员看全部，普通用户只看自己 ----------
     def _actor(self, actor=None):
@@ -282,9 +324,9 @@ class FileEvidenceService:
         return None
 
     def list_evidence(self, actor=None) -> list:
-        """按权限列出存证：管理员=全部；普通用户=自己的；未登录=匿名（无归属）存证。"""
+        """按权限列出存证：管理员/超级管理员=全部；普通用户=自己的；未登录=匿名（无归属）存证。"""
         user = self._actor(actor)
-        if user is not None and user.role == "admin":
+        if user is not None and user.role in PRIVILEGED_ROLES:
             records = self.evidence.find_all()
         elif user is not None:
             records = self.evidence.find_by_user(user.id)
@@ -295,7 +337,7 @@ class FileEvidenceService:
     def count_evidence(self, actor=None) -> int:
         """按权限统计存证数量。"""
         user = self._actor(actor)
-        if user is not None and user.role == "admin":
+        if user is not None and user.role in PRIVILEGED_ROLES:
             return self.evidence.count()
         if user is not None:
             return self.evidence.count(user.id)
@@ -315,7 +357,7 @@ class FileEvidenceService:
 
     @staticmethod
     def _filter_owned(records, user):
-        if user is not None and user.role == "admin":
+        if user is not None and user.role in PRIVILEGED_ROLES:
             return records
         if user is not None:
             return [r for r in records if r.uploader_id == user.id]

@@ -6,6 +6,7 @@ gui.py —— PyQt5 桌面界面：国密区块链通用电子文件加密存证
 本文件只负责业务逻辑与信号绑定。
 
 功能：
+    0. 启动时先弹出登录框（login.ui），支持注册新账号；登录成功才进入主界面
     1. 文件拖拽上传（或点击选择），自动计算并显示 SM3 指纹
     2. 一键签署并上链，分步展示 SM2 签名过程（指纹 → 载荷 → 签名 → 共识上链）
     3. 验真页：三重校验结果以红绿图标区分，内置「篡改 / 伪造签名」攻击演示
@@ -29,7 +30,14 @@ warnings.filterwarnings("ignore", message="sipPyTypeDict")
 try:
     from PyQt5 import uic
     from PyQt5.QtCore import Qt, QThread, pyqtSignal
-    from PyQt5.QtWidgets import QApplication, QMainWindow
+    from PyQt5.QtWidgets import (
+        QAbstractItemView,
+        QApplication,
+        QDialog,
+        QMainWindow,
+        QMessageBox,
+        QTableWidgetItem,
+    )
 except ImportError as exc:  # 缺少 GUI 依赖时给出可执行提示，而非直接抛栈
     sys.stderr.write(
         "未检测到 PyQt5，无法启动图形界面。\n"
@@ -43,6 +51,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from crypto import crypto as cc
 from blockchain.chain import EvidenceChain
 from app import config
+from app.login import LoginDialog
 from app.service import FileEvidenceService
 
 UI_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gui.ui")
@@ -52,6 +61,9 @@ BAD_ICON = "❌"
 GREEN = "#1DC981"
 RED = "#E8463A"
 GRAY = "#8A8A93"
+
+ROLE_NAMES = {"superadmin": "超级管理员", "admin": "管理员", "user": "普通用户"}
+STATUS_NAMES = {"enabled": "启用", "disabled": "禁用"}
 
 
 def now_ts() -> str:
@@ -83,7 +95,7 @@ class Worker(QThread):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, svc=None):
         super().__init__()
         # 界面由 gui.ui 定义，加载后所有具名控件成为本实例的属性
         uic.loadUi(UI_PATH, self)
@@ -93,12 +105,17 @@ class MainWindow(QMainWindow):
         self.splitter.setChildrenCollapsible(False)
         self.splitter.setStretchFactor(0, 3)
         self.splitter.setStretchFactor(1, 1)
-        self.splitter.setSizes([560, 180])
+        self.splitter.setSizes([590, 160])
 
         # ---- 业务对象 ----
-        self.chain = EvidenceChain(nodes=["node-A", "node-B", "node-C"],
-                                   required_confirmations=2)
-        self.svc = FileEvidenceService(self.chain, state_path=config.STATE_PATH)
+        # 登录成功后复用登录框所持的服务实例，登录态（current_user）才能延续到存证操作；
+        # 未传 svc 时（如单独实例化本窗口）按默认配置自建。
+        if svc is None:
+            chain = EvidenceChain(nodes=["node-A", "node-B", "node-C"],
+                                  required_confirmations=2)
+            svc = FileEvidenceService(chain, state_path=config.STATE_PATH)
+        self.svc = svc
+        self.chain = svc.chain
         self.uploader = cc.Signer.generate()   # 上传方身份（私钥仅存内存，不出本地）
         self.auditor = cc.Signer.generate()    # 审计方身份
         self._file_counter = 0
@@ -115,9 +132,17 @@ class MainWindow(QMainWindow):
             "签名(SM2)": self.row_sign,
         }
 
+        # 页面改为「导航按钮 + 整页覆盖」：隐藏 QTabWidget 的标签栏，仅保留内容区
+        self.tabs.tabBar().setVisible(False)
+        self.tabs.setDocumentMode(True)
+        self._nav_buttons = [self.btn_nav_sign, self.btn_nav_verify,
+                             self.btn_nav_center, self.btn_nav_users]
+        self._admin_ready = False
+
         self._bind()
         self._reset_rows()
         self._load_history()                   # 重启后从本地快照回填历史链上存证
+        self._apply_session()                  # 登录态、用户中心、权限页可见性
 
         self.log("系统就绪：模拟联盟链节点 node-A / node-B / node-C，共识确认数 2")
         self.log(f"上传方身份已生成（私钥仅存内存），公钥指纹 {self.uploader.pubkey_fingerprint}")
@@ -134,6 +159,19 @@ class MainWindow(QMainWindow):
         self.btn_tamper.clicked.connect(self.on_tamper)
         self.btn_forge.clicked.connect(self.on_forge)
         self.btn_clear_log.clicked.connect(self.log_box.clear)
+
+        # 页面导航：点击按钮整页切换
+        for idx, btn in enumerate(self._nav_buttons):
+            btn.clicked.connect(lambda _=False, i=idx: self._goto_page(i))
+
+        # 用户中心
+        self.btn_change_pwd.clicked.connect(self._change_password)
+        self.btn_logout.clicked.connect(self._logout)
+
+        # 用户权限管理（仅超级管理员可访问该页）
+        self.btn_refresh_users.clicked.connect(self._refresh_users)
+        self.btn_make_admin.clicked.connect(lambda: self._change_user_role("admin"))
+        self.btn_make_user.clicked.connect(lambda: self._change_user_role("user"))
 
         for lbl in (self.lbl_sign_digest, self.lbl_verify_digest, self.lbl_sign_result):
             lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -242,6 +280,157 @@ class MainWindow(QMainWindow):
             self.cmb_evidence.setCurrentIndex(self.cmb_evidence.count() - 1)
         self.log(f"已从本地快照恢复 {len(history)} 条历史链上存证，链高度 {self.chain.height()}"
                  "（重启不再丢失，可直接验真 / 解密）")
+
+    # --------------------------------------------- 页面导航 / 登录态
+    def _goto_page(self, index: int):
+        """跳转页面：整页覆盖显示，不做多标签并列。"""
+        if index == 3 and self.btn_nav_users.isHidden():
+            return
+        self.tabs.setCurrentIndex(index)
+        for i, btn in enumerate(self._nav_buttons):
+            btn.setChecked(i == index)
+
+    def _apply_session(self, announce=True):
+        """把当前登录用户同步到标题、导航栏与用户中心，并控制权限页可见性。"""
+        user = self.svc.current_user()
+        if not user:
+            return
+        role = ROLE_NAMES.get(user["role"], user["role"])
+        self.setWindowTitle(f"信链 · 国密电子文件存证系统 · {user['display_name']}")
+        self.lbl_nav_user.setText(f"{user['username']} · {role}")
+        self.lbl_center_username.setText(user["username"])
+        self.lbl_center_display.setText(user["display_name"] or "—")
+        self.lbl_center_role.setText(role)
+        self.lbl_center_status.setText(STATUS_NAMES.get(user["status"], user["status"]))
+        created = (user.get("created_at") or "").replace("T", " ")[:19]
+        self.lbl_center_created.setText(created or "—")
+
+        is_super = user["role"] == "superadmin"
+        self.btn_nav_users.setVisible(is_super)
+        if is_super:
+            self._setup_user_admin()
+            self._refresh_users()
+        elif self.tabs.currentIndex() == 3:
+            self._goto_page(0)
+
+        self._clear_pwd_fields()
+        self.lbl_pwd_msg.clear()
+        if announce:
+            self.log(f"当前登录用户：{user['display_name']}（{user['username']} / {role}），"
+                     "本次存证将归属该账号")
+
+    def _clear_pwd_fields(self):
+        for edt in (self.edt_old_pwd, self.edt_new_pwd, self.edt_new_pwd2):
+            edt.clear()
+
+    def _set_pwd_msg(self, text, ok=True):
+        self.lbl_pwd_msg.setText(text)
+        self.lbl_pwd_msg.setStyleSheet(f"color:{GREEN if ok else RED};")
+
+    def _change_password(self):
+        old = self.edt_old_pwd.text()
+        new = self.edt_new_pwd.text()
+        confirm = self.edt_new_pwd2.text()
+        if not old or not new:
+            self._set_pwd_msg("请完整填写原密码与新密码", ok=False)
+            return
+        if new != confirm:
+            self._set_pwd_msg("两次输入的新密码不一致", ok=False)
+            return
+        try:
+            self.svc.change_password(old, new)
+        except (PermissionError, ValueError) as exc:
+            self._set_pwd_msg(str(exc), ok=False)
+            return
+        except Exception as exc:
+            self._set_pwd_msg(f"修改失败：{type(exc).__name__}: {exc}", ok=False)
+            return
+        user = self.svc.current_user()
+        self._clear_pwd_fields()
+        self._set_pwd_msg("密码修改成功，下次登录请使用新密码", ok=True)
+        self.log(f"账号 {user['username'] if user else ''} 修改密码成功（PBKDF2 重新加盐哈希）")
+
+    def _logout(self):
+        user = self.svc.current_user()
+        if not user:
+            return
+        answer = QMessageBox.question(
+            self, "退出登录", "退出后需要重新输入账号密码，确定继续？",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if answer != QMessageBox.Yes:
+            return
+        self.log(f"用户 {user['display_name']} 退出登录")
+        self.svc.logout()
+        dlg = LoginDialog(self.svc, self)
+        if dlg.exec_() != QDialog.Accepted:
+            self.close()
+            return
+        self._apply_session()
+        self._goto_page(0)
+
+    # --------------------------------------------- 用户权限管理（仅超级管理员）
+    def _setup_user_admin(self):
+        """配置用户列表；重复调用安全（登出换账号后不会重复建列）。"""
+        if self._admin_ready:
+            return
+
+        self.tbl_users.setColumnCount(4)
+        self.tbl_users.setHorizontalHeaderLabels(["用户名", "角色", "状态", "创建时间"])
+        self.tbl_users.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.tbl_users.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.tbl_users.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.tbl_users.verticalHeader().setVisible(False)
+        self.tbl_users.horizontalHeader().setStretchLastSection(True)
+        self.tbl_users.setColumnWidth(0, 160)
+        self.tbl_users.setColumnWidth(1, 100)
+        self.tbl_users.setColumnWidth(2, 80)
+        self._admin_ready = True
+
+    def _refresh_users(self):
+        try:
+            users = self.svc.list_users()
+        except (PermissionError, ValueError) as exc:
+            self._set_users_msg(f"无法加载用户列表：{exc}", ok=False)
+            return
+        self.tbl_users.setRowCount(len(users))
+        for row, u in enumerate(users):
+            name_item = QTableWidgetItem(u["username"])
+            name_item.setData(Qt.UserRole, u["username"])
+            self.tbl_users.setItem(row, 0, name_item)
+            self.tbl_users.setItem(row, 1, QTableWidgetItem(
+                ROLE_NAMES.get(u["role"], u["role"])))
+            self.tbl_users.setItem(row, 2, QTableWidgetItem(
+                STATUS_NAMES.get(u["status"], u["status"])))
+            created = (u.get("created_at") or "").replace("T", " ")[:19]
+            self.tbl_users.setItem(row, 3, QTableWidgetItem(created))
+        self._set_users_msg(f"共 {len(users)} 个账号；选中一行后可调整角色", ok=True)
+
+    def _change_user_role(self, role):
+        item = self.tbl_users.currentItem()
+        if item is None:
+            self._set_users_msg("请先在列表中选择要调整的用户", ok=False)
+            return
+        username = self.tbl_users.item(item.row(), 0).text()
+        role_name = ROLE_NAMES.get(role, role)
+        answer = QMessageBox.question(
+            self, "确认修改权限", f"确定将用户「{username}」设为{role_name}？",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if answer != QMessageBox.Yes:
+            return
+        try:
+            info = self.svc.set_user_role(username, role)
+        except (PermissionError, ValueError) as exc:
+            self._set_users_msg(f"修改失败：{exc}", ok=False)
+            self.log(f"权限变更失败：{username} → {role_name}（{exc}）")
+            return
+        new_role = ROLE_NAMES.get(info["role"], info["role"])
+        self._refresh_users()
+        self._set_users_msg(f"已将「{username}」设为{new_role}", ok=True)
+        self.log(f"权限变更：{username} → {new_role}")
+
+    def _set_users_msg(self, text, ok=True):
+        self.lbl_users_msg.setText(text)
+        self.lbl_users_msg.setStyleSheet(f"color:{GREEN if ok else RED};")
 
     # ------------------------------------------------------- 验真与攻击演示
     def on_verify_file(self, name, data):
@@ -364,7 +553,16 @@ def main():
     app.setApplicationName("国密区块链电子文件存证系统")
     app.setOrganizationName("contract-chain-demo")
     app.setStyle("Fusion")
-    win = MainWindow()
+
+    # 先登录（登录态保存在同一个 service 实例上），成功后再进入主界面
+    chain = EvidenceChain(nodes=["node-A", "node-B", "node-C"],
+                          required_confirmations=2)
+    svc = FileEvidenceService(chain, state_path=config.STATE_PATH)
+    login = LoginDialog(svc)
+    if login.exec_() != QDialog.Accepted:
+        return
+
+    win = MainWindow(svc)
     win.show()
     sys.exit(app.exec_())
 
