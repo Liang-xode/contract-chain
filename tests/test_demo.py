@@ -18,7 +18,18 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from crypto import sm2_keys, crypto as cc
 from blockchain.chain import EvidenceChain
+from sqlalchemy.orm import sessionmaker
+from app.dao import build_engine
+from app.models import Base
 from app.service import FileEvidenceService
+
+# 演示存证文件目录（test1.doc / 年度财务报表.xlsx / 采购框架协议.pdf 等）
+DEMO_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "demo_files")
+
+
+def demo_bytes(filename):
+    with open(os.path.join(DEMO_DIR, filename), "rb") as f:
+        return f.read()
 
 
 class TestSM2Pubkey(unittest.TestCase):
@@ -79,16 +90,29 @@ class TestBusinessFlow(unittest.TestCase):
         self._tmpdir = tempfile.mkdtemp(prefix="cc_demo_")
         # 隔离密文文件服务器，避免污染项目根目录
         os.environ["CONTRACT_CHAIN_CIPHER_STORE_DIR"] = os.path.join(self._tmpdir, "cipher_store")
+        # 隔离数据库：使用临时 SQLite，避免向项目根 evidence.db 写入测试存证
+        self._engine = build_engine(
+            "sqlite:///" + os.path.join(self._tmpdir, "demo.db").replace("\\", "/"))
+        Base.metadata.create_all(bind=self._engine)
+        self.factory = sessionmaker(bind=self._engine, expire_on_commit=False)
         self.chain = EvidenceChain()
-        self.svc = FileEvidenceService(self.chain)
+        self.svc = FileEvidenceService(self.chain, session_factory=self.factory)
         self.uploader = cc.Signer.generate()
         self.party2 = cc.Signer.generate()
         self.file_id = "FILE-TEST-001"
-        self.filename = "测试论文.docx"
-        self.raw = "基于国密算法的可信存证系统设计。中文内容测试。".encode("utf-8")
+        self.filename = "test1.doc"
+        self.raw = demo_bytes(self.filename)
         self.created = self.svc.submit_file(self.file_id, self.filename, self.raw,
                                             self.uploader, "pass")
         self.ev_no = self.created["receipt"]["evidence_no"]
+
+    def tearDown(self):
+        try:
+            self._engine.dispose()
+        except Exception:
+            pass
+        import shutil
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_chain_valid_after_submit(self):
         self.assertTrue(self.chain.is_chain_valid())
@@ -111,9 +135,13 @@ class TestBusinessFlow(unittest.TestCase):
         self.assertEqual(self.svc.decrypt_file(self.file_id, "pass"), self.raw)
 
     def test_sm4_wrong_passphrase_rejected(self):
-        """错误口令必须解密失败（保密性生效）。"""
-        with self.assertRaises(ValueError):
-            self.svc.decrypt_file(self.file_id, "wrong-pass")
+        """错误口令不能还原出原文（保密性生效）。"""
+        # SM4 无认证，错误密钥下填充校验极低概率可能通过，故断言「不是原文」
+        try:
+            plain = self.svc.decrypt_file(self.file_id, "wrong-pass")
+        except ValueError:
+            plain = None
+        self.assertNotEqual(plain, self.raw)
 
     def test_forged_signature_detected(self):
         forger = cc.Signer.generate()
@@ -134,7 +162,7 @@ class TestBusinessFlow(unittest.TestCase):
 
     def test_chain_tamper_detected(self):
         tmp = EvidenceChain()
-        svc = FileEvidenceService(tmp)
+        svc = FileEvidenceService(tmp, session_factory=self.factory)
         r = svc.submit_file("T", "t.bin", b"data", self.uploader, "x")["receipt"]
         self.assertTrue(tmp.is_chain_valid())
         tmp.tamper_block(r["block_index"], "txs", [])

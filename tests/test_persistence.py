@@ -34,13 +34,21 @@ from app.dao.repository import (
     SignerRepository,
     UserRepository,
 )
-from app.models import Base
+from app.models import Base, Evidence, LoginSession, Signer, User
 from app.service import FileEvidenceService
 
 
 ADMIN_PASS = "Admin#2026"
 USER_PASS = "User#2026"
 ORIGINAL = "TOP-SECRET-ORIGINAL-CONTENT-中国机密原文".encode("utf-8")
+
+# 演示存证文件目录（与 demo_files 保持一致）
+DEMO_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "demo_files")
+
+
+def demo_bytes(filename):
+    with open(os.path.join(DEMO_DIR, filename), "rb") as f:
+        return f.read()
 
 
 class _BasePersistTest(unittest.TestCase):
@@ -81,7 +89,7 @@ class TestSchema(_BasePersistTest):
     def test_evidence_columns(self):
         cols = {c["name"] for c in inspect(self.engine).get_columns("evidence")}
         self.assertTrue(
-            {"file_sha256", "file_name", "signer_pubkey", "signature",
+            {"file_id", "file_sha256", "file_name", "signer_pubkey", "signature",
              "chain_hash", "semantic_index", "uploader_id"} <= cols, cols)
 
 
@@ -121,10 +129,11 @@ class TestFullLifecycle(_BasePersistTest):
         self.assertIsNone(self.svc.current_user())
 
     def test_login_rejects_wrong_password_and_disabled(self):
+        self.svc.register_user("root", ADMIN_PASS, role="superadmin")
         self.svc.register_user("alice", USER_PASS)
         with self.assertRaises(ValueError):
             self.svc.login("alice", "wrong-pass")
-        self.assertTrue(self.svc.set_user_status("alice", "disabled"))
+        self.assertTrue(self.svc.set_user_status("alice", "disabled", actor="root"))
         with self.assertRaises(ValueError):
             self.svc.login("alice", USER_PASS)
 
@@ -342,6 +351,220 @@ class TestImmutability(_BasePersistTest):
         signers = SignerRepository(self.factory).find_by_user(None)
         matching = [s for s in signers if s.pubkey == uploader.public_key]
         self.assertEqual(len(matching), 1)   # 同一公钥只登记一次
+
+
+# --------------------------------------------------------------------------- #
+# ⑥ 超级管理员：启用 / 停用 / 删除用户 / 重置密码
+# --------------------------------------------------------------------------- #
+class TestUserAdminOps(_BasePersistTest):
+    def setUp(self):
+        super().setUp()
+        self.svc.register_user("root", ADMIN_PASS, role="superadmin")
+        self.svc.register_user("alice", USER_PASS)
+        self.svc.register_user("ops", USER_PASS, role="admin")
+
+    def test_only_superadmin_can_change_status(self):
+        with self.assertRaises(PermissionError):
+            self.svc.set_user_status("alice", "disabled", actor="alice")
+        with self.assertRaises(PermissionError):
+            self.svc.set_user_status("alice", "disabled", actor="ops")
+
+        self.assertTrue(self.svc.set_user_status("alice", "disabled", actor="root"))
+        with self.assertRaises(ValueError):
+            self.svc.login("alice", USER_PASS)
+
+        self.assertTrue(self.svc.set_user_status("alice", "enabled", actor="root"))
+        self.svc.login("alice", USER_PASS)
+
+        # 超级管理员账号受保护
+        with self.assertRaises(ValueError):
+            self.svc.set_user_status("root", "disabled", actor="root")
+
+    def test_delete_user_keeps_evidence_and_clears_owner(self):
+        self.svc.login("alice", USER_PASS)
+        alice_id = self.svc.current_user()["id"]
+        uploader = cc.Signer.generate()
+        self.svc.submit_file("FILE-001", "合同.pdf", ORIGINAL, uploader, "pp")
+
+        with self.svc._session_factory() as s:
+            self.assertTrue(s.query(LoginSession).filter(
+                LoginSession.user_id == alice_id).count() > 0)
+
+        with self.assertRaises(PermissionError):
+            self.svc.delete_user("alice", actor="ops")
+        with self.assertRaises(ValueError):
+            self.svc.delete_user("root", actor="root")
+        with self.assertRaises(ValueError):
+            self.svc.delete_user("nobody", actor="root")
+
+        self.svc.delete_user("alice", actor="root")
+
+        # 账号已物理删除、无法登录
+        self.assertIsNone(self.svc.users.find_by_username("alice"))
+        with self.assertRaises(ValueError):
+            self.svc.login("alice", USER_PASS)
+
+        # 存证本体保留，归属清空；登录态与签名人归属同步清理
+        with self.svc._session_factory() as s:
+            rows = s.query(Evidence).filter(Evidence.file_name == "合同.pdf").all()
+            self.assertTrue(rows)                       # 存证记录仍在
+            self.assertTrue(all(r.uploader_id is None for r in rows))
+            self.assertTrue(all(r.file_sha256 == cc.sm3_hash(ORIGINAL) for r in rows))
+            self.assertEqual(s.query(LoginSession).filter(
+                LoginSession.user_id == alice_id).count(), 0)
+        signer = self.svc.signers.find_by_pubkey(uploader.public_key)
+        self.assertIsNotNone(signer)                    # 签名人登记保留
+        self.assertIsNone(signer.user_id)               # 仅清空归属
+
+    def test_reset_password_by_superadmin(self):
+        logged = self.svc.login("alice", USER_PASS)
+        token = logged["token"]
+
+        with self.assertRaises(PermissionError):
+            self.svc.reset_password("alice", "NewPass#2026", actor="alice")
+        with self.assertRaises(PermissionError):
+            self.svc.reset_password("alice", "NewPass#2026", actor="ops")
+        with self.assertRaises(ValueError):
+            self.svc.reset_password("alice", "123", actor="root")
+        with self.assertRaises(ValueError):
+            self.svc.reset_password("root", "NewPass#2026", actor="root")
+        with self.assertRaises(ValueError):
+            self.svc.reset_password("nobody", "NewPass#2026", actor="root")
+
+        self.svc.reset_password("alice", "NewPass#2026", actor="root")
+        # 旧登录态失效、旧密码失效、新密码可登录
+        self.assertIsNone(self.svc.sessions.validate_token(token))
+        with self.assertRaises(ValueError):
+            self.svc.login("alice", USER_PASS)
+        self.svc.login("alice", "NewPass#2026")
+        user = self.svc.users.find_by_username("alice")
+        self.assertNotIn("NewPass#2026", user.password_hash)
+
+
+# --------------------------------------------------------------------------- #
+# ⑦ 检索：file_id 命中
+# --------------------------------------------------------------------------- #
+class TestFileIdSearch(_BasePersistTest):
+    def test_search_by_file_id(self):
+        self.svc.register_user("alice", USER_PASS, role="admin")
+        self.svc.login("alice", USER_PASS)
+        uploader = cc.Signer.generate()
+        demo_raw = demo_bytes("test1.doc")            # 使用 demo_files/test1.doc
+        self.svc.submit_file("FILE-001", "test1.doc", demo_raw, uploader, "pp")
+
+        # file_id 不在文件名 / 语义索引中，仅靠 DAO 的 file_id 字段命中
+        hits = self.svc.search_evidence("FILE-001")
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0]["file_id"], "FILE-001")
+        self.assertEqual(hits[0]["file_name"], "test1.doc")
+
+        # 写入数据库的 file_id 字段
+        with self.svc._session_factory() as s:
+            row = s.query(Evidence).filter(Evidence.file_name == "test1.doc").first()
+            self.assertEqual(row.file_id, "FILE-001")
+            self.assertEqual(row.file_sha256, cc.sm3_hash(demo_raw))
+
+        # 既有按文件名检索不回退
+        self.assertEqual(len(self.svc.search_evidence("test1")), 1)
+
+    def test_search_includes_db_only_records(self):
+        """本机 evidence 表中未上链的历史记录也应能被检索到（现有存证检索）。"""
+        self.svc.register_user("alice", USER_PASS, role="admin")
+        self.svc.login("alice", USER_PASS)
+        alice_id = self.svc.current_user()["id"]
+        signer = cc.Signer.generate()
+        self.svc.evidence.save_evidence(
+            file_id="FILE-H1", file_sha256=cc.sm3_hash(ORIGINAL),
+            file_name="历史采购记录.pdf", signer_pubkey=signer.public_key,
+            signature="sig", chain_hash="deadbeef",
+            semantic_index="历史采购记录 pdf", uploader_id=alice_id)
+
+        hits = self.svc.search_evidence("历史采购")
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0]["file_id"], "FILE-H1")
+        self.assertEqual(hits[0]["file_name"], "历史采购记录.pdf")
+        self.assertIsNone(hits[0]["evidence_no"])          # 未上链标记
+        # 普通用户看不到别人的历史记录
+        self.svc.register_user("bob", USER_PASS)
+        self.svc.logout()
+        self.svc.login("bob", USER_PASS)
+        self.assertEqual(len(self.svc.search_evidence("历史采购")), 0)
+
+
+# --------------------------------------------------------------------------- #
+# ⑧ 检索页默认列表：空检索词 = 当前操作者可查看范围（越权不可见）
+# --------------------------------------------------------------------------- #
+class TestSearchVisibleScope(_BasePersistTest):
+    def setUp(self):
+        super().setUp()
+        self.svc.register_user("root", ADMIN_PASS, role="superadmin")
+        self.svc.register_user("alice", USER_PASS, role="admin")
+        self.svc.register_user("bob", USER_PASS)
+
+    def test_empty_query_lists_visible_evidence(self):
+        """空检索：普通用户=自己上传；管理员=全部；未登录=匿名存证。"""
+        self.svc.login("alice", USER_PASS)
+        self.svc.submit_file("FILE-A1", "test1.doc", demo_bytes("test1.doc"),
+                             cc.Signer.generate(), "pp")
+        self.svc.logout()
+
+        self.svc.login("bob", USER_PASS)
+        self.svc.submit_file("FILE-B1", "年度财务报表.xlsx", demo_bytes("年度财务报表.xlsx"),
+                             cc.Signer.generate(), "pp")
+
+        # 普通用户：只看到自己上传的
+        own = self.svc.search_evidence("")
+        self.assertEqual([h["file_id"] for h in own], ["FILE-B1"])
+        self.assertEqual(own[0]["uploader_username"], "bob")
+
+        # 未登录：只看到匿名（无归属）存证，此处没有 → 空列表
+        self.svc.logout()
+        self.assertEqual(self.svc.search_evidence(""), [])
+
+        # 管理员 / 超级管理员：看到全部
+        self.svc.login("root", ADMIN_PASS)
+        all_hits = self.svc.search_evidence("")
+        self.assertEqual({h["file_id"] for h in all_hits}, {"FILE-A1", "FILE-B1"})
+        # 已上链的记录补全了存证编号
+        self.assertTrue(all(h["evidence_no"] for h in all_hits))
+
+    def test_keyword_filtered_within_visible_scope(self):
+        """输入关键词后只在可查看范围内过滤，越权存证不出现。"""
+        self.svc.login("alice", USER_PASS)
+        self.svc.submit_file("FILE-A1", "test1.doc", demo_bytes("test1.doc"),
+                             cc.Signer.generate(), "pp")
+        self.svc.logout()
+
+        self.svc.login("bob", USER_PASS)
+        self.svc.submit_file("FILE-B1", "年度财务报表.xlsx", demo_bytes("年度财务报表.xlsx"),
+                             cc.Signer.generate(), "pp")
+        self.assertEqual([h["file_id"] for h in self.svc.search_evidence("FILE-B1")], ["FILE-B1"])
+        self.assertEqual(self.svc.search_evidence("FILE-A1"), [])      # 越权内容不出现
+
+        # 管理员可在全量范围内按 file_id 过滤
+        self.svc.logout()
+        self.svc.login("alice", USER_PASS)
+        self.assertEqual([h["file_id"] for h in self.svc.search_evidence("FILE-A1")], ["FILE-A1"])
+
+    def test_anonymous_evidence_only_for_unlogged(self):
+        """匿名存证：未登录可见；普通用户与管理员的可查看列表不含匿名存证时各自按权限返回。"""
+        signer = cc.Signer.generate()
+        self.svc.evidence.save_evidence(
+            file_id="FILE-ANON", file_sha256=cc.sm3_hash(ORIGINAL),
+            file_name="匿名存证.pdf", signer_pubkey=signer.public_key,
+            signature="sig", chain_hash="deadbeef",
+            semantic_index="匿名存证 pdf", uploader_id=None)
+
+        anon = self.svc.search_evidence("")
+        self.assertEqual(len(anon), 1)
+        self.assertEqual(anon[0]["file_id"], "FILE-ANON")
+        self.assertEqual(anon[0]["file_name"], "匿名存证.pdf")
+        self.assertIsNone(anon[0]["uploader_id"])
+        self.assertIsNone(anon[0]["evidence_no"])
+
+        self.svc.login("bob", USER_PASS)
+        self.assertEqual(self.svc.search_evidence(""), [])             # 普通用户看不到匿名存证
+        self.assertEqual(self.svc.search_evidence("匿名"), [])
 
 
 if __name__ == "__main__":

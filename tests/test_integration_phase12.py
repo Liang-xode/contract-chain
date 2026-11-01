@@ -12,8 +12,19 @@ from app.dao import build_engine
 from app.models import Base
 from app.service import FileEvidenceService
 
-ORIGINAL = "机密采购合同 · TOP-SECRET-中国原文 content".encode("utf-8")
-ORIGINAL2 = "年度财务报表 · finance report 2026".encode("utf-8")
+# 演示存证文件（demo_files 目录）
+DEMO_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "demo_files")
+FILE1 = "test1.doc"
+FILE2 = "年度财务报表.xlsx"
+
+
+def demo_bytes(filename):
+    with open(os.path.join(DEMO_DIR, filename), "rb") as f:
+        return f.read()
+
+
+ORIGINAL = demo_bytes(FILE1)
+ORIGINAL2 = demo_bytes(FILE2)
 PASS = "StrongPass#2026"
 WRONG_PASS = "wrong-pass"
 
@@ -59,8 +70,8 @@ class Phase12Test(unittest.TestCase):
         self.svc.login("alice", PASS)
         store = KeyStore(self._keystore_dir)
         signer = store.load_or_generate("alice", PASS)
-        r = self.svc.submit_file("FILE-001", "采购合同.pdf", ORIGINAL, signer, PASS,
-                                 meta={"文件名": "采购合同.pdf", "大小": len(ORIGINAL)})
+        r = self.svc.submit_file("FILE-001", FILE1, ORIGINAL, signer, PASS,
+                                 meta={"文件名": FILE1, "大小": len(ORIGINAL)})
         # _files 里应带独立 salt
         rec = self.svc._files["FILE-001"]
         self.assertIn("salt", rec)
@@ -72,7 +83,7 @@ class Phase12Test(unittest.TestCase):
         self.svc.login("alice", PASS)
         store = KeyStore(self._keystore_dir)
         signer = store.load_or_generate("alice", PASS)
-        self.svc.submit_file("FILE-001", "采购合同.pdf", ORIGINAL, signer, PASS)
+        self.svc.submit_file("FILE-001", FILE1, ORIGINAL, signer, PASS)
         v = self.svc.decrypt_and_verify("FILE-001", PASS)
         self.assertTrue(v["ok"], v)
         self.assertTrue(v["verified"], v)
@@ -86,11 +97,14 @@ class Phase12Test(unittest.TestCase):
         self.svc.login("alice", PASS)
         store = KeyStore(self._keystore_dir)
         signer = store.load_or_generate("alice", PASS)
-        self.svc.submit_file("FILE-001", "采购合同.pdf", ORIGINAL, signer, PASS)
+        self.svc.submit_file("FILE-001", FILE1, ORIGINAL, signer, PASS)
         v = self.svc.decrypt_and_verify("FILE-001", WRONG_PASS)
-        self.assertFalse(v["ok"])
+        # 错误口令绝不能通过验真（SM4 无认证，极低概率下填充校验可能通过，
+        # 但还原明文的 SM3 必然与链上不一致）
         self.assertFalse(v["verified"])
-        self.assertIn("口令错误", v.get("error", ""))
+        self.assertFalse(v["ok"] and v["verified"])
+        if not v["ok"]:
+            self.assertIn("口令错误", v.get("error", ""))
 
     # ---------------- P0-5 关键词检索 + 权限 ---------------- #
     def test_search_by_filename_keyword(self):
@@ -98,21 +112,21 @@ class Phase12Test(unittest.TestCase):
         self.svc.register_user("bob", PASS)
         self.svc.login("alice", PASS)
         s_a = cc.Signer.generate()
-        self.svc.submit_file("FILE-A1", "采购合同.pdf", ORIGINAL, s_a, PASS)
-        self.svc.submit_file("FILE-A2", "年度报告.docx", ORIGINAL2, s_a, PASS)
+        self.svc.submit_file("FILE-A1", FILE1, ORIGINAL, s_a, PASS)
+        self.svc.submit_file("FILE-A2", FILE2, ORIGINAL2, s_a, PASS)
         self.svc.logout()
         self.svc.login("bob", PASS)
         s_b = cc.Signer.generate()
-        self.svc.submit_file("FILE-B1", "采购合同-v2.pdf", b"bob-content", s_b, PASS)
+        self.svc.submit_file("FILE-B1", "test1-副本.doc", b"bob-content", s_b, PASS)
         # alice（admin）能看到全部
         self.svc.logout()
         self.svc.login("alice", PASS)
-        hits = self.svc.search_evidence("采购")
+        hits = self.svc.search_evidence("test1")
         self.assertEqual(len(hits), 2)
         # bob（普通用户）只能看到自己的
         self.svc.logout()
         self.svc.login("bob", PASS)
-        hits = self.svc.search_evidence("采购")
+        hits = self.svc.search_evidence("test1")
         self.assertEqual(len(hits), 1)
         self.assertEqual(hits[0]["file_id"], "FILE-B1")
 
@@ -131,7 +145,7 @@ class Phase12Test(unittest.TestCase):
         self.svc.register_user("alice", PASS, role="admin")
         self.svc.login("alice", PASS)
         s = cc.Signer.generate()
-        r = self.svc.submit_file("FILE-001", "采购合同.pdf", ORIGINAL, s, PASS)["receipt"]
+        r = self.svc.submit_file("FILE-001", FILE1, ORIGINAL, s, PASS)["receipt"]
         ev_no = r["evidence_no"]
         report = self.svc.evidence_report(ev_no)
         self.assertEqual(report["存证编号"], ev_no)
@@ -149,7 +163,7 @@ class Phase12Test(unittest.TestCase):
         self.svc.register_user("alice", PASS, role="admin")
         self.svc.login("alice", PASS)
         s = cc.Signer.generate()
-        self.svc.submit_file("FILE-001", "采购合同.pdf", ORIGINAL, s, PASS)
+        self.svc.submit_file("FILE-001", FILE1, ORIGINAL, s, PASS)
         rec = self.svc._files["FILE-001"]
         # 内存态不再存 cipher_hex，改为 cipher_path
         self.assertNotIn("cipher_hex", rec)
@@ -169,13 +183,16 @@ class Phase12Test(unittest.TestCase):
         self.svc.register_user("alice", PASS, role="admin")
         self.svc.login("alice", PASS)
         s = cc.Signer.generate()
-        self.svc.submit_file("FILE-001", "采购合同.pdf", ORIGINAL, s, PASS)
+        self.svc.submit_file("FILE-001", FILE1, ORIGINAL, s, PASS)
         # 删除内存中的 cipher_hex（新存证本就没有），且删除内存态也应能从密文文件解密
         plain = self.svc.decrypt_file("FILE-001", PASS)
         self.assertEqual(plain, ORIGINAL)
-        # 错误口令拒绝
-        with self.assertRaises(ValueError):
-            self.svc.decrypt_file("FILE-001", WRONG_PASS)
+        # 错误口令绝不可能还原出原文（SM4 无认证，填充校验极低概率可能通过）
+        try:
+            wrong = self.svc.decrypt_file("FILE-001", WRONG_PASS)
+        except ValueError:
+            wrong = None
+        self.assertNotEqual(wrong, ORIGINAL)
 
     def test_cipher_path_recorded_in_db(self):
         from app.models import Evidence
@@ -183,9 +200,9 @@ class Phase12Test(unittest.TestCase):
         self.svc.register_user("alice", PASS, role="admin")
         self.svc.login("alice", PASS)
         s = cc.Signer.generate()
-        self.svc.submit_file("FILE-001", "采购合同.pdf", ORIGINAL, s, PASS)
+        self.svc.submit_file("FILE-001", FILE1, ORIGINAL, s, PASS)
         with Session(self.engine) as sess:
-            rows = sess.query(Evidence).filter(Evidence.file_name == "采购合同.pdf").all()
+            rows = sess.query(Evidence).filter(Evidence.file_name == FILE1).all()
             self.assertTrue(rows)
             self.assertTrue(all(r.cipher_path for r in rows))
 
@@ -194,7 +211,7 @@ class Phase12Test(unittest.TestCase):
         self.svc.register_user("alice", PASS, role="admin")
         self.svc.login("alice", PASS)
         s = cc.Signer.generate()
-        self.svc.submit_file("FILE-001", "采购合同.pdf", ORIGINAL, s, PASS)
+        self.svc.submit_file("FILE-001", FILE1, ORIGINAL, s, PASS)
         rec = self.svc._files["FILE-001"]
         # 模拟历史态：删掉密文文件，仅留 cipher_hex
         import os
@@ -211,16 +228,16 @@ class Phase12Test(unittest.TestCase):
         self.svc.register_user("alice", PASS, role="admin")
         self.svc.login("alice", PASS)
         s = cc.Signer.generate()
-        self.svc.submit_file("FILE-001", "采购合同.pdf", ORIGINAL, s, PASS)
+        self.svc.submit_file("FILE-001", FILE1, ORIGINAL, s, PASS)
         # 默认目录
-        p1 = self.svc.save_recovered_file("采购合同.pdf", ORIGINAL)
+        p1 = self.svc.save_recovered_file(FILE1, ORIGINAL)
         import os
         self.assertTrue(os.path.isfile(p1))
         with open(p1, "rb") as f:
             self.assertEqual(f.read(), ORIGINAL)
         # 自定义路径
         custom = os.path.join(self._tmpdir, "out", "my_recovered.pdf")
-        p2 = self.svc.save_recovered_file("采购合同.pdf", ORIGINAL, target_path=custom)
+        p2 = self.svc.save_recovered_file(FILE1, ORIGINAL, target_path=custom)
         self.assertEqual(p2, custom)
         with open(p2, "rb") as f:
             self.assertEqual(f.read(), ORIGINAL)
@@ -230,7 +247,7 @@ class Phase12Test(unittest.TestCase):
         self.svc.register_user("alice", PASS, role="admin")
         self.svc.login("alice", PASS)
         s = cc.Signer.generate()
-        r = self.svc.submit_file("FILE-001", "采购合同.pdf", ORIGINAL, s, PASS)
+        r = self.svc.submit_file("FILE-001", FILE1, ORIGINAL, s, PASS)
         ev_no = r["receipt"]["evidence_no"]
         v = self.svc.decrypt_and_verify("FILE-001", PASS)
         self.assertTrue(v["ok"] and v["verified"])

@@ -113,6 +113,7 @@ class FileEvidenceService:
         # 8) 持久化（DAO）：只存 指纹/公钥/签名/链哈希/语义索引/密文路径，不含原文与私钥
         uploader_id = self._current_user.id if self._current_user else None
         self.evidence.save_evidence(
+            file_id=file_id,
             file_sha256=digest, file_name=filename,
             signer_pubkey=uploader.public_key, signature=signature,
             chain_hash=receipt["block_hash"],
@@ -155,6 +156,7 @@ class FileEvidenceService:
         # 持久化（DAO）：登记签认记录 + 签名人
         uploader_id = self._current_user.id if self._current_user else record.get("uploader_id")
         self.evidence.save_evidence(
+            file_id=file_id,
             file_sha256=digest, file_name=filename,
             signer_pubkey=signer.public_key, signature=signature,
             chain_hash=receipt["block_hash"],
@@ -417,9 +419,63 @@ class FileEvidenceService:
         self._current_user = self.users.find_by_username(user.username)
         return True
 
-    def set_user_status(self, username: str, status: str) -> bool:
-        """管理员启用 / 禁用账号。"""
-        return self.users.set_status(username, status)
+    def set_user_status(self, username: str, status: str, actor=None) -> bool:
+        """启用 / 停用账号：仅超级管理员可操作；超级管理员账号与当前登录账号受保护。"""
+        user = self._actor(actor)
+        if user is None or user.role != "superadmin":
+            raise PermissionError("仅超级管理员可启用 / 停用账号")
+        if status not in ("enabled", "disabled"):
+            raise ValueError(f"不支持的状态：{status}")
+        target = self.users.find_by_username(username)
+        if target is None:
+            raise ValueError(f"用户不存在：{username}")
+        if target.role == "superadmin":
+            raise ValueError("超级管理员账号不可修改状态")
+        if target.id == user.id and status == "disabled":
+            raise ValueError("不能停用当前登录账号")
+        self.users.set_status(username, status)
+        return True
+
+    def delete_user(self, username: str, actor=None) -> dict:
+        """删除账号：仅超级管理员可操作。
+
+        删除的是账号本身；该用户的存证记录本体保留（uploader_id 置空，不可篡改），
+        其登录态全部失效，签名人登记保留公钥、仅清空归属。
+        """
+        user = self._actor(actor)
+        if user is None or user.role != "superadmin":
+            raise PermissionError("仅超级管理员可删除用户")
+        target = self.users.find_by_username(username)
+        if target is None:
+            raise ValueError(f"用户不存在：{username}")
+        if target.role == "superadmin":
+            raise ValueError("超级管理员账号不可删除")
+        if target.id == user.id:
+            raise ValueError("不能删除当前登录账号")
+        if not self.users.delete_user(target.id):
+            raise ValueError(f"用户不存在：{username}")
+        return {"username": username, "id": target.id}
+
+    def reset_password(self, username: str, new_password: str, actor=None) -> dict:
+        """管理员代重置密码：仅超级管理员可操作，无需原密码；超级管理员账号受保护。
+
+        重置后以新的随机盐重新做 PBKDF2 哈希，并吊销该用户全部登录态（迫使其重新登录）。
+        """
+        user = self._actor(actor)
+        if user is None or user.role != "superadmin":
+            raise PermissionError("仅超级管理员可重置用户密码")
+        if not new_password or len(new_password) < 6:
+            raise ValueError("新密码至少 6 位")
+        target = self.users.find_by_username(username)
+        if target is None:
+            raise ValueError(f"用户不存在：{username}")
+        if target.role == "superadmin":
+            raise ValueError("超级管理员账号不可重置密码")
+        password_hash, salt = hash_password(new_password)
+        if not self.users.update_password(target.id, password_hash, salt):
+            raise ValueError(f"用户不存在：{username}")
+        self.sessions.revoke_user_sessions(target.id)
+        return self._user_dto(self.users.find_by_username(username))
 
     def list_users(self, actor=None) -> list:
         """用户列表：仅超级管理员可查看。"""
@@ -476,13 +532,19 @@ class FileEvidenceService:
 
     def search_evidence(self, query: str, actor=None) -> list:
         """
-        关键词检索（P0-5 方案 B，如实降级，预留 LLM 语义扩展）。
+        存证检索（P0-5 方案 B，如实降级，预留 LLM 语义扩展）。
 
-        DAO 层（硬约束收口）：先调 EvidenceRepository.semantic_search(query) 做候选召回 ——
-          - 按 semantic_index LIKE '%q%' 或 file_name LIKE '%q%' 匹配，DAO 负责 DB 层检索
-          - 返回候选 contract_hash 集合
-        Service 层：遍历链上所有存证，取 contract_hash 在候选集合里的，叠加权限过滤 +
-          file_id/file_name 关键词二次校验（覆盖 DAO 没覆盖的字段）。
+        空检索词：返回「当前操作者可查看的存证列表」，权限逻辑与 list_evidence 一致
+          （管理员 / 超级管理员=全部；普通用户=自己上传的；未登录=匿名（无归属）存证），
+          并补全链上存证编号，供检索页进入时默认展示。
+        非空检索词：仍在该「可查看范围」内按 file_id / 文件名 / 语义索引 / 指纹关键词过滤，
+          任何用户都看不到权限范围之外的存证。
+
+        数据来源（两路合并）：
+          1) 链上存证：按 file_id / file_name / 语义索引 / 指纹 二次校验，并用 DAO 的归属映射做权限过滤；
+          2) 本机 `evidence` 表中未上链的历史记录（如早期演示数据）：由 DAO semantic_search 召回后
+             同样做关键词二次校验与权限过滤，避免历史存证检索不到。
+        DAO 层（硬约束收口）：EvidenceRepository.semantic_search 按 semantic_index / file_name / file_id 匹配。
 
         返回 dict 含 evidence_no / file_id / file_name / file_sha256 / uploader_id / uploader_username。
         预留扩展点：DAO EvidenceRepository.semantic_search 可换成 PostgreSQL tsvector / MySQL FULLTEXT；
@@ -490,60 +552,111 @@ class FileEvidenceService:
         """
         user = self._actor(actor)
         q = (query or "").lower().strip()
+
+        # 链上条目：补 evidence_no / block_index / file_id 等（同一指纹可能对应多条 tx，逐条保留）
+        chain_events = self.list_chain_evidence()
+        chain_hashes = {ev.get("contract_hash") for ev in chain_events}
+        # 指纹 → 首条链上存证：给本机 evidence 记录补「存证编号 / 区块高度」
+        chain_index = {}
+        for ev in chain_events:
+            hash_ = ev.get("contract_hash")
+            if hash_ and hash_ not in chain_index:
+                chain_index[hash_] = ev
+
+        def uploader_name(uploader_id):
+            if not uploader_id:
+                return ""
+            try:
+                ur = self.users.find_by_id(uploader_id)
+                return ur.username if ur else ""
+            except Exception:
+                return ""
+
+        # 空检索：直接返回可查看范围内的全部存证（检索页进入 / 刷新时默认展示）
         if not q:
-            return []
+            results = []
+            for dto in self.list_evidence(actor):
+                ev = chain_index.get(dto.get("file_sha256")) or {}
+                results.append({
+                    "evidence_no": ev.get("evidence_no"),
+                    "file_id": dto.get("file_id") or "",
+                    "file_name": dto.get("file_name") or dto.get("file_id") or "",
+                    "file_sha256": dto.get("file_sha256"),
+                    "uploader_id": dto.get("uploader_id"),
+                    "uploader_username": uploader_name(dto.get("uploader_id")),
+                    "block_index": ev.get("block_index"),
+                    "ts": ev.get("ts") or dto.get("created_at"),
+                })
+            return results
 
-        # DAO 层：先按 semantic_index + file_name 做候选召回
-        dao_candidates = self.evidence.semantic_search(query)
-        candidate_hashes = {r.file_sha256 for r in dao_candidates} if dao_candidates else set()
-
-        # 预加载 DAO 里所有 uploader 关联（contract_hash → uploader_id / semantic_index）
-        all_records = self.evidence.find_all()
+        # 归属 / 语义索引映射：同一指纹可能有多条历史记录，优先取「有归属、语义索引非空」的那条
         hash_to_uploader = {}
         hash_to_semantic = {}
-        for r in all_records:
-            hash_to_uploader.setdefault(r.file_sha256, r.uploader_id)
-            hash_to_semantic.setdefault(r.file_sha256, r.semantic_index or "")
+        hash_to_file_id = {}
+        for r in self.evidence.find_all():
+            hash = r.file_sha256
+            if hash not in hash_to_uploader or (hash_to_uploader[hash] is None and r.uploader_id is not None):
+                hash_to_uploader[hash] = r.uploader_id
+            if r.semantic_index and not hash_to_semantic.get(hash):
+                hash_to_semantic[hash] = r.semantic_index
+            if r.file_id and not hash_to_file_id.get(hash):
+                hash_to_file_id[hash] = r.file_id
 
         results = []
-        for ev in self.list_chain_evidence():
-            contract_hash = ev.get("contract_hash")
-            # 第一层过滤：DAO 召回
-            if candidate_hashes and contract_hash not in candidate_hashes:
-                continue
-            uploader_id = hash_to_uploader.get(contract_hash)
-            # 权限过滤
+
+        def allowed(uploader_id):
             if user is None:
-                if uploader_id is not None:
-                    continue    # 未登录只能看 uploader_id 为 None 的匿名存证
-            elif user.role not in PRIVILEGED_ROLES:
-                if uploader_id != user.id:
-                    continue
-            # 第二层：file_id + file_name 关键词校验（覆盖 DAO semantic_search 没覆盖的字段）
+                return uploader_id is None      # 未登录只能看匿名（无归属）存证
+            if user.role in PRIVILEGED_ROLES:
+                return True
+            return uploader_id == user.id
+
+        def hit(file_id, file_name, semantic, contract_hash):
             haystack = " ".join([
-                str(ev.get("file_id") or "").lower(),
-                str(ev.get("file_name") or "").lower(),
-                str(hash_to_semantic.get(contract_hash, "") or "").lower(),
-                str(contract_hash or "").lower(),
+                str(file_id or "").lower(), str(file_name or "").lower(),
+                str(semantic or "").lower(), str(contract_hash or "").lower(),
             ])
-            if q not in haystack:
+            return q in haystack
+
+        # 1) 链上存证：file_id / file_name / 语义索引 / 指纹 二次校验
+        for ev in chain_events:
+            contract_hash = ev.get("contract_hash")
+            uploader_id = hash_to_uploader.get(contract_hash)
+            if not allowed(uploader_id):
                 continue
-            uploader_username = ""
-            if uploader_id:
-                try:
-                    ur = self.users.find_by_id(uploader_id)
-                    uploader_username = ur.username if ur else ""
-                except Exception:
-                    uploader_username = ""
+            file_id = ev.get("file_id") or hash_to_file_id.get(contract_hash) or ""
+            file_name = ev.get("file_name") or ""
+            if not hit(file_id, file_name, hash_to_semantic.get(contract_hash), contract_hash):
+                continue
             results.append({
                 "evidence_no": ev.get("evidence_no"),
-                "file_id": ev.get("file_id"),
-                "file_name": ev.get("file_name"),
+                "file_id": file_id,
+                "file_name": file_name or file_id,
                 "file_sha256": contract_hash,
                 "uploader_id": uploader_id,
-                "uploader_username": uploader_username,
+                "uploader_username": uploader_name(uploader_id),
                 "block_index": ev.get("block_index"),
                 "ts": ev.get("ts"),
+            })
+
+        # 2) 本机存证库中未上链的历史记录（如早期演示数据）：同样按关键词 + 权限返回
+        for r in self.evidence.semantic_search(query):
+            if r.file_sha256 in chain_hashes:
+                continue                        # 已由链上结果覆盖
+            if not allowed(r.uploader_id):
+                continue
+            file_id = r.file_id or ""
+            if not hit(file_id, r.file_name, r.semantic_index, r.file_sha256):
+                continue
+            results.append({
+                "evidence_no": None,
+                "file_id": file_id,
+                "file_name": r.file_name or file_id,
+                "file_sha256": r.file_sha256,
+                "uploader_id": r.uploader_id,
+                "uploader_username": uploader_name(r.uploader_id),
+                "block_index": None,
+                "ts": r.created_at,
             })
         return results
 
@@ -696,7 +809,8 @@ class FileEvidenceService:
 
     @staticmethod
     def _evidence_dto(record) -> dict:
-        return {"id": record.id, "file_sha256": record.file_sha256,
+        return {"id": record.id, "file_id": record.file_id,
+                "file_sha256": record.file_sha256,
                 "file_name": record.file_name, "signer_pubkey": record.signer_pubkey,
                 "signature": record.signature, "chain_hash": record.chain_hash,
                 "semantic_index": record.semantic_index,

@@ -861,7 +861,7 @@ QLabel#lbl_nav_user {
          <item>
           <widget class="QLabel" name="lbl_users_hint">
            <property name="text">
-            <string>仅超级管理员可见：可将普通用户设为管理员，或将管理员降为普通用户。超级管理员账号受保护，不可在此修改。</string>
+            <string>仅超级管理员可见：可调整角色、启用 / 停用账号、重置密码、删除账号。超级管理员账号受保护；删除账号不会删除其存证记录（归属清空、存证本体保留）。</string>
            </property>
            <property name="wordWrap">
             <bool>true</bool>
@@ -901,6 +901,37 @@ QLabel#lbl_nav_user {
             <widget class="QPushButton" name="btn_make_user">
              <property name="text">
               <string>设为普通用户</string>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QPushButton" name="btn_enable_user">
+             <property name="text">
+              <string>启用</string>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QPushButton" name="btn_disable_user">
+             <property name="text">
+              <string>停用</string>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QPushButton" name="btn_reset_user_pwd">
+             <property name="text">
+              <string>重置密码</string>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QPushButton" name="btn_delete_user">
+             <property name="styleSheet">
+              <string notr="true">color: #E8463A;</string>
+             </property>
+             <property name="text">
+              <string>删除用户</string>
              </property>
             </widget>
            </item>

@@ -65,15 +65,20 @@ def init_db():
 def _migrate_schema(engine):
     """
     轻量级迁移：对已存在的旧表补列（不动数据，保证向前兼容）。
-    当前仅处理 evidence.cipher_path（密文文件服务器路径，可空）。
+    当前处理 evidence.cipher_path（密文文件服务器路径）与 evidence.file_id（业务文件标识），均可空。
     """
     insp = inspect(engine)
     if "evidence" not in insp.get_table_names():
         return
     cols = {c["name"] for c in insp.get_columns("evidence")}
-    if "cipher_path" not in cols:
-        with engine.begin() as conn:
-            conn.execute(text("ALTER TABLE evidence ADD COLUMN cipher_path VARCHAR(512)"))
+    pending = {
+        "cipher_path": "ALTER TABLE evidence ADD COLUMN cipher_path VARCHAR(512)",
+        "file_id": "ALTER TABLE evidence ADD COLUMN file_id VARCHAR(64)",
+    }
+    with engine.begin() as conn:
+        for column, ddl in pending.items():
+            if column not in cols:
+                conn.execute(text(ddl))
 
 
 def get_session_factory():

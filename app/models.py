@@ -65,6 +65,7 @@ class Evidence(Base):
     __tablename__ = "evidence"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    file_id = Column(String(64), nullable=True, index=True)        # 业务文件标识（如 FILE-001；可空以兼容历史）
     file_sha256 = Column(String(64), nullable=False, index=True)   # 需求字段名；实际存放 SM3 指纹
     file_name = Column(String(255), nullable=False)
     signer_pubkey = Column(String(256), nullable=False)            # SM2 公钥（hex）

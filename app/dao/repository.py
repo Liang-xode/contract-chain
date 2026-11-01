@@ -7,8 +7,8 @@ repository.py —— 仓库（DAO）层：所有数据库读写收口于此
   - EvidenceRepository 不提供 update / delete —— 存证记录不可篡改。
 
 提供仓库类：
-  UserRepository     用户账号：创建 / 查询 / 校验登录 / 改状态
-  SessionRepository  登录态：签发 / 校验 token / 吊销（登出）
+  UserRepository     用户账号：创建 / 查询 / 校验登录 / 改状态 / 删除（引用置空）
+  SessionRepository  登录态：签发 / 校验 token / 吊销（登出 / 按用户批量吊销）
   EvidenceRepository 存证记录：写入 / 按指纹查 / 语义检索 / 按归属查 / 计数
   SignerRepository   签名人登记：登记（幂等）/ 按公钥或归属查
 """
@@ -122,6 +122,30 @@ class UserRepository(_BaseRepository):
         with self._session() as s:
             return s.query(User).order_by(User.id).all()
 
+    def delete_user(self, user_id) -> bool:
+        """物理删除用户，并处理引用（存证本体保留，不做物理删除）：
+
+          - sessions：删除该用户全部登录态（迫使其重新登录）
+          - evidence.uploader_id → NULL（存证记录本体保留，不可篡改）
+          - signer.user_id      → NULL（签名人登记仍保留公钥）
+        """
+        with self._session() as s:
+            user = s.get(User, user_id)
+            if user is None:
+                return False
+            (s.query(LoginSession)
+             .filter(LoginSession.user_id == user_id)
+             .delete(synchronize_session=False))
+            (s.query(Evidence)
+             .filter(Evidence.uploader_id == user_id)
+             .update({Evidence.uploader_id: None}, synchronize_session=False))
+            (s.query(Signer)
+             .filter(Signer.user_id == user_id)
+             .update({Signer.user_id: None}, synchronize_session=False))
+            s.delete(user)
+            s.commit()
+            return True
+
 
 class SessionRepository(_BaseRepository):
     """登录态仓库。"""
@@ -158,6 +182,15 @@ class SessionRepository(_BaseRepository):
             s.commit()
             return True
 
+    def revoke_user_sessions(self, user_id) -> int:
+        """吊销某用户的全部登录态（管理员重置密码后迫使其重新登录）。"""
+        with self._session() as s:
+            count = (s.query(LoginSession)
+                     .filter(LoginSession.user_id == user_id)
+                     .delete(synchronize_session=False))
+            s.commit()
+            return count
+
 
 class EvidenceRepository(_BaseRepository):
     """存证记录仓库 —— 只增不改不删（不可篡改）。
@@ -167,11 +200,11 @@ class EvidenceRepository(_BaseRepository):
 
     def save_evidence(self, file_sha256, file_name, signer_pubkey, signature,
                       chain_hash, semantic_index=None, uploader_id=None,
-                      cipher_path=None) -> Evidence:
+                      cipher_path=None, file_id=None) -> Evidence:
         """写入一条存证记录（只存指纹 / 公钥 / 签名 / 链哈希 / 语义索引 / 密文路径，绝不含原文与私钥）。"""
         with self._session() as s:
             record = Evidence(
-                file_sha256=file_sha256, file_name=file_name,
+                file_id=file_id, file_sha256=file_sha256, file_name=file_name,
                 signer_pubkey=signer_pubkey, signature=signature,
                 chain_hash=chain_hash, semantic_index=semantic_index,
                 uploader_id=uploader_id, cipher_path=cipher_path,
@@ -188,14 +221,15 @@ class EvidenceRepository(_BaseRepository):
                     .order_by(Evidence.created_at.desc()).all())
 
     def semantic_search(self, query, limit=20):
-        """语义检索：当前按关键词索引匹配（semantic_index / 文件名），预留 AI 向量检索接口。"""
+        """语义检索：当前按关键词索引匹配（semantic_index / 文件名 / file_id），预留 AI 向量检索接口。"""
         if not query:
             return []
         pattern = f"%{query}%"
         with self._session() as s:
             return (s.query(Evidence)
                     .filter(or_(Evidence.semantic_index.like(pattern),
-                                Evidence.file_name.like(pattern)))
+                                Evidence.file_name.like(pattern),
+                                Evidence.file_id.like(pattern)))
                     .order_by(Evidence.created_at.desc()).limit(limit).all())
 
     def find_by_user(self, user_id):

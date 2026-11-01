@@ -181,6 +181,102 @@ class PassphraseDialog(QDialog):
         return self.edt_passphrase.text()
 
 
+class ResetPasswordDialog(QDialog):
+    """管理员代重置密码对话框：默认新密码 123456（可直接提交），支持改填 + 二次确认，至少 6 位。"""
+
+    MIN_LEN = 6
+    DEFAULT_PASSWORD = "123456"
+
+    def __init__(self, username, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"重置密码 · {username}")
+        self.setModal(True)
+        self.setMinimumWidth(440)
+        self._username = username
+
+        layout = QVBoxLayout(self)
+
+        tip = QLabel(
+            f"将为账号「{username}」设置新的登录密码（至少 {self.MIN_LEN} 位，默认 {self.DEFAULT_PASSWORD}）。\n"
+            "重置后该账号的登录态立即失效，需用新密码重新登录；原密码无需提供。")
+        tip.setWordWrap(True)
+        layout.addWidget(tip)
+
+        row1 = QHBoxLayout()
+        row1.addWidget(QLabel("新密码："))
+        self.edt_new_pwd = QLineEdit()
+        self.edt_new_pwd.setEchoMode(QLineEdit.Password)
+        self.edt_new_pwd.setPlaceholderText("至少 6 位")
+        row1.addWidget(self.edt_new_pwd, 1)
+        layout.addLayout(row1)
+
+        row2 = QHBoxLayout()
+        row2.addWidget(QLabel("确认密码："))
+        self.edt_new_pwd2 = QLineEdit()
+        self.edt_new_pwd2.setEchoMode(QLineEdit.Password)
+        self.edt_new_pwd2.setPlaceholderText("再次输入新密码")
+        row2.addWidget(self.edt_new_pwd2, 1)
+        layout.addLayout(row2)
+
+        self.lbl_msg = QLabel("")
+        self.lbl_msg.setWordWrap(True)
+        self.lbl_msg.setMinimumHeight(20)
+        layout.addWidget(self.lbl_msg)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
+        self.btn_ok = QPushButton("确定重置")
+        self.btn_ok.setDefault(True)
+        self.btn_ok.setEnabled(False)          # 校验通过前不可提交
+        self.btn_cancel = QPushButton("取消")
+        btn_row.addWidget(self.btn_ok)
+        btn_row.addWidget(self.btn_cancel)
+        layout.addLayout(btn_row)
+
+        self.edt_new_pwd.textChanged.connect(self._validate)
+        self.edt_new_pwd2.textChanged.connect(self._validate)
+        self.edt_new_pwd2.returnPressed.connect(self._on_accept)
+        self.btn_ok.clicked.connect(self._on_accept)
+        self.btn_cancel.clicked.connect(self.reject)
+
+        # 默认填入 123456（含确认框），管理员可直接点「确定重置」；也可改填自定义密码
+        self.edt_new_pwd.setText(self.DEFAULT_PASSWORD)
+        self.edt_new_pwd2.setText(self.DEFAULT_PASSWORD)
+        self._validate()
+        self.edt_new_pwd.selectAll()
+
+    def _validate(self, *_):
+        new = self.edt_new_pwd.text()
+        confirm = self.edt_new_pwd2.text()
+        self.btn_ok.setEnabled(self._check(new, confirm))
+
+    def _check(self, new, confirm) -> bool:
+        if not new and not confirm:
+            self.lbl_msg.clear()
+            return False
+        if len(new) < self.MIN_LEN:
+            self.lbl_msg.setText(f"⚠ 新密码至少 {self.MIN_LEN} 位，当前 {len(new)} 位")
+            self.lbl_msg.setStyleSheet(f"color:{RED};")
+            return False
+        if new != confirm:
+            self.lbl_msg.setText("⚠ 两次输入的新密码不一致")
+            self.lbl_msg.setStyleSheet(f"color:{RED};")
+            return False
+        self.lbl_msg.setText("✅ 校验通过，可提交重置")
+        self.lbl_msg.setStyleSheet(f"color:{GREEN};")
+        return True
+
+    def _on_accept(self):
+        new = self.edt_new_pwd.text()
+        if not self._check(new, self.edt_new_pwd2.text()):
+            self.edt_new_pwd.setFocus()
+            return
+        self.accept()
+
+    def new_password(self) -> str:
+        return self.edt_new_pwd.text()
+
+
 class MainWindow(QMainWindow):
     def __init__(self, svc=None):
         super().__init__()
@@ -264,6 +360,10 @@ class MainWindow(QMainWindow):
         self.btn_refresh_users.clicked.connect(self._refresh_users)
         self.btn_make_admin.clicked.connect(lambda: self._change_user_role("admin"))
         self.btn_make_user.clicked.connect(lambda: self._change_user_role("user"))
+        self.btn_enable_user.clicked.connect(lambda: self._change_user_status("enabled"))
+        self.btn_disable_user.clicked.connect(lambda: self._change_user_status("disabled"))
+        self.btn_reset_user_pwd.clicked.connect(self._reset_user_password)
+        self.btn_delete_user.clicked.connect(self._delete_user)
 
         # 代码动态创建的新增控件信号
         self.btn_search.clicked.connect(self.on_search)
@@ -295,13 +395,14 @@ class MainWindow(QMainWindow):
         # --- 1) 存证检索页 ---
         search_layout = self.tab_search.layout()
         lbl_search_hint = QLabel(
-            "按文件名关键词 / 元数据 / SM3 指纹片段检索链上存证（结果按当前登录用户权限过滤）。"
+            "进入本页默认展示您可查看的全部存证（管理员 / 超级管理员=全部、普通用户=本人上传、未登录=匿名存证）；"
+            "输入 file_id / 文件名关键词 / SM3 指纹片段即在可查看范围内过滤，越权存证不会出现。"
             "双击一行可跳转到「授权解密」页并自动填入 file_id。")
         lbl_search_hint.setWordWrap(True)
         lbl_search_hint.setStyleSheet(f"color:{GRAY};")
         search_layout.addWidget(lbl_search_hint)
 
-        search_group = QGroupBox("关键词检索（文件名 / 元数据 / 指纹模糊匹配）")
+        search_group = QGroupBox("存证检索（空检索词=可查看列表；关键词=在可查看范围内过滤）")
         search_group.setStyleSheet(
             "QGroupBox { font-weight:bold; border:1px solid #3E7BFA; border-radius:6px; margin-top:10px; } "
             "QGroupBox::title { subcontrol-origin: margin; left:10px; padding:0 4px; }")
@@ -309,17 +410,22 @@ class MainWindow(QMainWindow):
         h1 = QHBoxLayout()
         h1.addWidget(QLabel("检索词："))
         self.edt_search = QLineEdit()
-        self.edt_search.setPlaceholderText("输入文件名关键词 / SM3 指纹片段，例：采购 / pdf / 报告")
+        self.edt_search.setPlaceholderText("输入 file_id / 文件名关键词 / SM3 指纹片段；留空则列出全部可查看存证")
         h1.addWidget(self.edt_search, 1)
         self.btn_search = QPushButton("🔍 检索")
         h1.addWidget(self.btn_search)
         v1.addLayout(h1)
-        self.tbl_search_results = QTableWidget(0, 4)
-        self.tbl_search_results.setHorizontalHeaderLabels(["存证号", "文件名", "上传账号", "指纹(SM3)"])
+        self.lbl_search_summary = QLabel("当前显示可查看的 0 条存证")
+        self.lbl_search_summary.setStyleSheet(f"color:{GRAY}; font-weight:bold;")
+        v1.addWidget(self.lbl_search_summary)
+        self.tbl_search_results = QTableWidget(0, 5)
+        self.tbl_search_results.setHorizontalHeaderLabels(
+            ["file_id", "存证号", "文件名", "上传账号", "指纹(SM3)"])
         self.tbl_search_results.horizontalHeader().setStretchLastSection(True)
         self.tbl_search_results.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self.tbl_search_results.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
-        self.tbl_search_results.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.tbl_search_results.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.tbl_search_results.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.tbl_search_results.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
         self.tbl_search_results.verticalHeader().setVisible(False)
         self.tbl_search_results.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.tbl_search_results.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -499,6 +605,10 @@ class MainWindow(QMainWindow):
         self.tabs.setCurrentIndex(index)
         for i, btn in enumerate(self._nav_buttons):
             btn.setChecked(i == index)
+        if index == 2:
+            # 进入检索页默认做一次空检索，展示当前登录用户可查看的存证列表
+            self.edt_search.clear()
+            self.on_search(quiet=True)
 
     def _apply_session(self, announce=True, password=None):
         """把当前登录用户同步到标题、导航栏、账号密钥、用户中心与权限页可见性。"""
@@ -551,6 +661,8 @@ class MainWindow(QMainWindow):
 
         self._clear_pwd_fields()
         self.lbl_pwd_msg.clear()
+        if self.tabs.currentIndex() == 2:
+            self.on_search(quiet=True)         # 登录态变化后刷新「可查看存证」列表
         if announce:
             self.log(f"当前登录用户：{user['display_name']}（{user['username']} / {role}），"
                      "本次存证将归属该账号")
@@ -639,7 +751,9 @@ class MainWindow(QMainWindow):
                 STATUS_NAMES.get(u["status"], u["status"])))
             created = (u.get("created_at") or "").replace("T", " ")[:19]
             self.tbl_users.setItem(row, 3, QTableWidgetItem(created))
-        self._set_users_msg(f"共 {len(users)} 个账号；选中一行后可调整角色", ok=True)
+        self._set_users_msg(
+            f"共 {len(users)} 个账号；选中一行后可调整角色 / 启用或停用 / 重置密码 / 删除",
+            ok=True)
 
     def _change_user_role(self, role):
         item = self.tbl_users.currentItem()
@@ -663,6 +777,79 @@ class MainWindow(QMainWindow):
         self._refresh_users()
         self._set_users_msg(f"已将「{username}」设为{new_role}", ok=True)
         self.log(f"权限变更：{username} → {new_role}")
+
+    def _selected_username(self):
+        """取用户列表当前选中行的用户名；未选中时提示并返回 None。"""
+        item = self.tbl_users.currentItem()
+        if item is None:
+            self._set_users_msg("请先在用户列表中选择一行", ok=False)
+            return None
+        return self.tbl_users.item(item.row(), 0).text()
+
+    def _change_user_status(self, status):
+        """启用 / 停用选中账号（仅超级管理员可操作，服务层二次校验权限）。"""
+        username = self._selected_username()
+        if not username:
+            return
+        label = "启用" if status == "enabled" else "停用"
+        extra = "" if status == "enabled" else "（停用后该账号将无法登录）"
+        answer = QMessageBox.question(
+            self, f"确认{label}", f"确定{label}账号「{username}」？{extra}",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if answer != QMessageBox.Yes:
+            return
+        try:
+            self.svc.set_user_status(username, status)
+        except (PermissionError, ValueError) as exc:
+            self._set_users_msg(f"{label}失败：{exc}", ok=False)
+            self.log(f"账号{label}失败：{username}（{exc}）")
+            return
+        self._refresh_users()
+        self._set_users_msg(f"已{label}账号「{username}」", ok=True)
+        self.log(f"账号状态变更：{username} → {STATUS_NAMES.get(status, status)}")
+
+    def _delete_user(self):
+        """删除选中账号（二次确认；存证本体保留，归属清空）。"""
+        username = self._selected_username()
+        if not username:
+            return
+        answer = QMessageBox.warning(
+            self, "确认删除用户",
+            f"确定永久删除账号「{username}」？\n\n"
+            "• 该账号的登录态立即失效\n"
+            "• 其存证记录本体保留，仅清空归属（上传账号显示为未登录匿名存证）\n"
+            "• 此操作不可撤销",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if answer != QMessageBox.Yes:
+            return
+        try:
+            self.svc.delete_user(username)
+        except (PermissionError, ValueError) as exc:
+            self._set_users_msg(f"删除失败：{exc}", ok=False)
+            self.log(f"删除用户失败：{username}（{exc}）")
+            return
+        self._refresh_users()
+        self._set_users_msg(f"已删除账号「{username}」（存证记录保留）", ok=True)
+        self.log(f"删除用户：{username}（账号已物理删除，存证本体保留、归属清空）")
+
+    def _reset_user_password(self):
+        """为选中账号代重置密码（无需原密码，重置后其登录态失效）。"""
+        username = self._selected_username()
+        if not username:
+            return
+        dlg = ResetPasswordDialog(username, self)
+        if dlg.exec_() != QDialog.Accepted:
+            self.log(f"（已取消重置密码：{username}）")
+            return
+        try:
+            self.svc.reset_password(username, dlg.new_password())
+        except (PermissionError, ValueError) as exc:
+            self._set_users_msg(f"重置密码失败：{exc}", ok=False)
+            self.log(f"重置密码失败：{username}（{exc}）")
+            return
+        self._refresh_users()
+        self._set_users_msg(f"已重置账号「{username}」的密码", ok=True)
+        self.log(f"重置密码：{username}（PBKDF2 重新加盐哈希，其登录态已失效）")
 
     def _set_users_msg(self, text, ok=True):
         self.lbl_users_msg.setText(text)
@@ -780,27 +967,38 @@ class MainWindow(QMainWindow):
         self.lbl_conclusion.setStyleSheet("font-weight:bold; font-size:15px;")
 
     # ---------------------------------------------- 关键词检索（P0-2 + P0-5 方案 B）
-    def on_search(self):
+    def on_search(self, quiet=False):
+        """检索：空检索词列出可查看范围全部存证；有关键词则在可查看范围内过滤。"""
         query = self.edt_search.text().strip()
         self.tbl_search_results.setRowCount(0)
-        if not query:
-            self.log("⚠ 请输入检索关键词（文件名 / 元数据 / SM3 指纹片段）")
-            return
-        self.log(f"🔍 关键词检索：「{query}」（按当前登录用户权限过滤）")
         try:
             results = self.svc.search_evidence(query)
         except Exception as exc:
+            self.lbl_search_summary.setText("检索失败，请查看日志")
             self.log(f"✖ 检索失败：{type(exc).__name__}: {exc}")
             return
         self.tbl_search_results.setRowCount(len(results))
         for row, r in enumerate(results):
-            item0 = QTableWidgetItem(short(r.get("evidence_no") or "", 14, 6))
+            item0 = QTableWidgetItem(r.get("file_id") or "")
             item0.setData(Qt.UserRole, r)
             self.tbl_search_results.setItem(row, 0, item0)
-            self.tbl_search_results.setItem(row, 1, QTableWidgetItem(r.get("file_name") or r.get("file_id") or ""))
-            self.tbl_search_results.setItem(row, 2, QTableWidgetItem(r.get("uploader_username") or "（未登录匿名存证）"))
-            self.tbl_search_results.setItem(row, 3, QTableWidgetItem(short(r.get("file_sha256") or "", 14, 6)))
-        self.log(f"检索完成，命中 {len(results)} 条；双击一行可自动填入解密区")
+            ev_no = r.get("evidence_no")
+            self.tbl_search_results.setItem(
+                row, 1, QTableWidgetItem(short(ev_no, 14, 6) if ev_no else "（本机未上链）"))
+            self.tbl_search_results.setItem(row, 2, QTableWidgetItem(r.get("file_name") or r.get("file_id") or ""))
+            self.tbl_search_results.setItem(row, 3, QTableWidgetItem(r.get("uploader_username") or "匿名"))
+            self.tbl_search_results.setItem(row, 4, QTableWidgetItem(short(r.get("file_sha256") or "", 14, 6)))
+        if query:
+            summary = f"「{query}」命中的 {len(results)} 条存证（当前可查看范围内）"
+            if not quiet:
+                self.log(f"🔍 关键词检索：「{query}」（按当前登录用户权限过滤）")
+        else:
+            summary = f"当前显示可查看的 {len(results)} 条存证"
+            if not quiet:
+                self.log(f"📋 已载入可查看存证 {len(results)} 条（按当前登录用户权限过滤）")
+        self.lbl_search_summary.setText(summary)
+        if not quiet:
+            self.log(f"检索完成，命中 {len(results)} 条；双击一行可自动填入解密区")
 
     def _on_search_double_clicked(self, index):
         row = index.row()
