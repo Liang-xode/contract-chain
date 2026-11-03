@@ -41,7 +41,7 @@ class StateStore:
             os.makedirs(directory, exist_ok=True)
         tmp = self.path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False)
+            json.dump(data, f, ensure_ascii=False,indent=2)
         os.replace(tmp, self.path)
         return True
 
