@@ -1,0 +1,267 @@
+/* ============================================================
+   信链 · 统一深色科技主题
+   主色深蓝黑 #050D1F ~ #0A1E42；强调青蓝 #35A7FF；
+   成功 #1DC981；失败 #E8463A。
+   ============================================================ */
+
+/* ---------- 基础 ---------- */
+QMainWindow {
+    background: transparent;
+}
+
+QWidget {
+    color: #E6F1FF;
+    font-size: 13px;
+    font-family: "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+}
+
+/* ---------- 三区骨架 ---------- */
+QFrame#top_bar {
+    background: rgba(5, 13, 31, 200);
+    border-bottom: 1px solid rgba(53, 167, 255, 60);
+}
+
+QFrame#side_nav {
+    background: rgba(10, 30, 66, 170);
+    border: 1px solid rgba(53, 167, 255, 50);
+    border-radius: 12px;
+}
+
+QFrame#status_bar {
+    background: rgba(5, 13, 31, 200);
+    border-top: 1px solid rgba(53, 167, 255, 45);
+}
+
+QLabel#lbl_brand {
+    color: #FFFFFF;
+    font-size: 18px;
+    font-weight: bold;
+    letter-spacing: 2px;
+}
+
+QLabel#lbl_brand_sub {
+    color: #6E8FB4;
+    font-size: 12px;
+}
+
+QLabel#lbl_nav_user {
+    color: #7FDBFF;
+    font-size: 13px;
+    padding-right: 6px;
+}
+
+QLabel#lbl_status {
+    color: #7F9FBF;
+    font-size: 12px;
+}
+
+QLabel#lbl_status_version {
+    color: #6E8FB4;
+    font-size: 12px;
+}
+
+/* ---------- 左侧导航 ---------- */
+QFrame#side_nav QPushButton {
+    background: transparent;
+    color: #A9C4DA;
+    border: none;
+    border-radius: 8px;
+    padding: 10px 14px;
+    text-align: left;
+    font-size: 13px;
+}
+
+QFrame#side_nav QPushButton:hover {
+    color: #FFFFFF;
+    background: rgba(53, 167, 255, 45);
+}
+
+QFrame#side_nav QPushButton:checked {
+    color: #FFFFFF;
+    background: rgba(53, 167, 255, 65);
+    border-left: 3px solid #35A7FF;
+    font-weight: bold;
+}
+
+/* ---------- 顶栏退出按钮 ---------- */
+QPushButton#btn_logout {
+    background: rgba(232, 70, 58, 40);
+    color: #FF9A92;
+    border: 1px solid rgba(232, 70, 58, 140);
+    border-radius: 6px;
+    padding: 6px 14px;
+}
+
+QPushButton#btn_logout:hover {
+    background: rgba(232, 70, 58, 90);
+    color: #FFFFFF;
+}
+
+/* ---------- 通用按钮 ---------- */
+QPushButton {
+    background: #1E3A6F;
+    color: #E6F1FF;
+    border: 1px solid #2E5BBA;
+    border-radius: 7px;
+    padding: 7px 16px;
+}
+
+QPushButton:hover {
+    background: #2E5BBA;
+    border-color: #35A7FF;
+}
+
+QPushButton:pressed {
+    background: #0D2B5E;
+}
+
+QPushButton:disabled {
+    background: #1A2540;
+    color: #5A6A8A;
+    border-color: #2A3550;
+}
+
+/* ---------- 卡片 / 分组 ---------- */
+QGroupBox, QFrame#card {
+    border: 1px solid rgba(53, 167, 255, 70);
+    border-radius: 10px;
+    margin-top: 12px;
+    padding: 14px;
+    background: rgba(10, 30, 66, 160);
+}
+
+QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 14px;
+    padding: 0 6px;
+    color: #35A7FF;
+    font-weight: bold;
+}
+
+/* ---------- 输入控件 ---------- */
+QLineEdit, QPlainTextEdit, QTextEdit {
+    background: rgba(5, 13, 31, 200);
+    color: #E6F1FF;
+    border: 1px solid #2E5BBA;
+    border-radius: 6px;
+    padding: 6px 10px;
+    selection-background-color: #35A7FF;
+    selection-color: #050D1F;
+}
+
+QComboBox {
+    background: rgba(5, 13, 31, 200);
+    color: #E6F1FF;
+    border: 1px solid #2E5BBA;
+    border-radius: 6px;
+    padding: 6px 10px;
+}
+
+QComboBox QAbstractItemView {
+    background: #0A1E42;
+    color: #E6F1FF;
+    selection-background-color: #35A7FF;
+    selection-color: #050D1F;
+}
+
+/* ---------- 表格 ---------- */
+QTableWidget {
+    background: rgba(5, 13, 31, 180);
+    alternate-background-color: rgba(30, 58, 111, 120);
+    gridline-color: rgba(53, 167, 255, 70);
+    border: 1px solid rgba(53, 167, 255, 70);
+    border-radius: 8px;
+    selection-background-color: rgba(53, 167, 255, 90);
+    selection-color: #FFFFFF;
+}
+
+QHeaderView::section {
+    background: #0D2B5E;
+    color: #35A7FF;
+    padding: 8px;
+    border: none;
+    border-right: 1px solid rgba(53, 167, 255, 60);
+    font-weight: bold;
+}
+
+/* ---------- 标签页（内容区） ---------- */
+QTabWidget#tabs::pane {
+    border: none;
+    background: transparent;
+}
+
+QTabWidget#tabs QTabBar {
+    background: transparent;
+}
+
+/* ---------- 业务页卡片化 ---------- */
+QWidget#tab_sign, QWidget#tab_verify, QWidget#tab_search,
+QWidget#tab_decrypt, QWidget#tab_report, QWidget#tab_center,
+QWidget#tab_logs, QWidget#tab_users {
+    background: rgba(10, 30, 66, 145);
+    border: 1px solid rgba(53, 167, 255, 55);
+    border-radius: 12px;
+}
+
+/* ---------- 日志页 Tab（保留兼容） ---------- */
+QTabWidget::pane {
+    border: 1px solid rgba(53, 167, 255, 60);
+    border-radius: 6px;
+    background: rgba(5, 13, 31, 150);
+}
+
+QTabBar::tab {
+    background: #0D2B5E;
+    color: #A9C4DA;
+    padding: 6px 14px;
+    border: 1px solid rgba(53, 167, 255, 60);
+    border-bottom: none;
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+    margin-right: 2px;
+}
+
+QTabBar::tab:selected {
+    background: #1E3A6F;
+    color: #35A7FF;
+    font-weight: bold;
+}
+
+/* ---------- 滚动条 ---------- */
+QScrollBar:vertical {
+    background: #0A1E42;
+    width: 10px;
+    border-radius: 5px;
+}
+
+QScrollBar::handle:vertical {
+    background: #2E5BBA;
+    border-radius: 5px;
+    min-height: 24px;
+}
+
+QScrollBar::handle:vertical:hover {
+    background: #35A7FF;
+}
+
+QScrollBar:horizontal {
+    background: #0A1E42;
+    height: 10px;
+    border-radius: 5px;
+}
+
+QScrollBar::handle:horizontal {
+    background: #2E5BBA;
+    border-radius: 5px;
+    min-width: 24px;
+}
+
+QScrollBar::add-line, QScrollBar::sub-line {
+    width: 0;
+    height: 0;
+}
+
+/* ---------- 提示 / 消息标签 ---------- */
+QLabel#lbl_users_msg, QLabel#lbl_logs_msg, QLabel#lbl_decrypt_result {
+    color: #A9C4DA;
+}

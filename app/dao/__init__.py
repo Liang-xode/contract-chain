@@ -13,6 +13,7 @@ dao —— 数据访问层（DAO）
 from app.dao.database import build_engine, get_engine, get_session_factory, init_db, reset_engine
 from app.dao.repository import (
     EvidenceRepository,
+    LogRepository,
     SessionRepository,
     SignerRepository,
     UserRepository,
@@ -29,6 +30,7 @@ __all__ = [
     "UserRepository",
     "SessionRepository",
     "EvidenceRepository",
+    "LogRepository",
     "SignerRepository",
     "StateStore",
     "CipherStore",

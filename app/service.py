@@ -21,6 +21,7 @@ service.py —— 业务逻辑层：通用电子文件加密存证、验真溯�
 """
 
 import os
+import re
 import time
 
 from crypto import crypto as cc
@@ -30,6 +31,7 @@ from app import config
 from app.dao import (
     CipherStore,
     EvidenceRepository,
+    LogRepository,
     SessionRepository,
     SignerRepository,
     StateStore,
@@ -59,6 +61,7 @@ class FileEvidenceService:
         self.sessions = SessionRepository(self._session_factory)
         self.evidence = EvidenceRepository(self._session_factory)
         self.signers = SignerRepository(self._session_factory)
+        self.logs = LogRepository(self._session_factory)
 
         # 本机密文文件服务器：SM4 密文 C 以独立 .enc 文件落盘（非原文/私钥/会话密钥）
         self._cipher_store = CipherStore(cipher_store_dir)
@@ -131,6 +134,7 @@ class FileEvidenceService:
             "meta": meta or {}, "created_ts": ts, "uploader_id": uploader_id,
         }
         self._save_state()                                    # 10) 落盘链状态（重启不丢）
+        self.log_entry("evidence", f"存证上链：file_id={file_id}，存证号={ev_no}")
         return {"file_id": file_id, "filename": filename, "digest": digest, "receipt": receipt}
 
     # ---------- 2. 多方签认 ----------
@@ -169,6 +173,47 @@ class FileEvidenceService:
                 "digest": digest, "receipt": receipt}
 
     # ---------- 3. 验真 ----------
+    def _verify_auditor_signatures(self, file_id: str, digest: str,
+                                   uploader_fp: str, uploader_ok: bool) -> dict:
+        """在链上查找同一 file_id + 同一指纹的「非上传方」追加签认（审计方），并验签。
+
+        返回：
+            auditor_fingerprint: 审计方公钥指纹（无则 None）
+            auditor_signed:      审计方签认是否有效
+            multi_sign_ok:       上传方 + 审计方签名均有效
+        """
+        auditor_fp = None
+        auditor_signed = False
+        # 遍历链上全部存证，找同 file_id + 同指纹、不同签名人的交易
+        for ev in self.list_chain_evidence():
+            if ev.get("file_id") != file_id:
+                continue
+            if ev.get("contract_hash") != digest:
+                continue
+            if ev.get("signer_fp") == uploader_fp:
+                continue          # 跳过上传方本人
+            full = self.chain.query_evidence(ev["evidence_no"])
+            if not full:
+                continue
+            atx = full["transaction"]
+            try:
+                auditor = cc.Signer.from_public_key(atx["pubkey"])
+                payload = f"{file_id}|{atx['contract_hash']}|{atx['ts']}".encode()
+                if auditor.verify(atx["signature"], payload):
+                    auditor_fp = atx["signer_fp"]
+                    auditor_signed = True
+                    break          # 取第一个有效的审计方签认
+                # 签认无效：记录该指纹但继续查找（可能存在多条签认）
+                auditor_fp = atx["signer_fp"]
+                auditor_signed = False
+            except Exception:
+                continue
+        return {
+            "auditor_fingerprint": auditor_fp,
+            "auditor_signed": auditor_signed,
+            "multi_sign_ok": uploader_ok and auditor_signed,
+        }
+
     def verify(self, evidence_no: str, candidate: bytes) -> dict:
         """
         三重校验：
@@ -215,6 +260,20 @@ class FileEvidenceService:
         else:
             result["checks"]["签名(SM2)"] = "失败：签名无效（签名主体不可信）"
             result["reason"] = "SM2 签名验证失败，签认行为不可信"
+
+        # (d) 审计方验证：查找同 file_id + 同指纹的非上传方追加签认并验签
+        audit = self._verify_auditor_signatures(
+            file_id, local_digest, tx["signer_fp"], uploader_ok=result["passed"])
+        result.update(audit)
+        if audit["auditor_signed"]:
+            result["checks"]["审计方签名"] = (
+                f"通过：审计方 {audit['auditor_fingerprint']} 签认有效")
+        elif audit["auditor_fingerprint"]:
+            result["checks"]["审计方签名"] = (
+                f"失败：审计方 {audit['auditor_fingerprint']} 签认无效")
+        else:
+            result["checks"]["审计方签名"] = "未检测：暂无审计方追加签认"
+        self.log_entry("verify", f"验真：存证号={evidence_no}，结果={'通过' if result['passed'] else '未通过'}")
         return result
 
     # ---------- 4. 授权解密还原 ----------
@@ -347,6 +406,8 @@ class FileEvidenceService:
         result["verified"] = (local_digest == chain_tx["contract_hash"])
         if not result["verified"]:
             result["error"] = "解密成功但还原后的 SM3 与链上存证不一致 —— 密文可能被篡改"
+        self.log_entry("decrypt", f"解密验真：file_id={file_id}，"
+                        f"验真={'通过' if result['verified'] else '未通过'}")
         return result
 
     # ---------- 5. 存证凭证 ----------
@@ -356,6 +417,14 @@ class FileEvidenceService:
         if on_chain is None:
             raise ValueError("存证不存在")
         tx = on_chain["transaction"]
+        # 从本机 evidence 表取语义索引（AI 摘要），用于报告展示
+        semantic_index = None
+        try:
+            records = self.evidence.find_by_fingerprint(tx["contract_hash"])
+            if records:
+                semantic_index = records[0].semantic_index
+        except Exception:
+            pass
         return {
             "存证编号": evidence_no,
             "文件指纹(SM3)": tx["contract_hash"],
@@ -366,6 +435,7 @@ class FileEvidenceService:
             "出块节点": on_chain["block"]["validator"],
             "存证时间": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(tx["ts"])),
             "共识确认数": self.chain.confirmations.get(evidence_no),
+            "语义摘要": semantic_index or "（无）",
         }
 
     # ======================================================================
@@ -385,6 +455,7 @@ class FileEvidenceService:
         sess = self.sessions.create_session(user.id, ttl_seconds=ttl_seconds)
         self._current_user = user
         self._current_token = sess.token
+        self.log_entry("auth", f"用户 {username} 登录成功")
         return {"token": sess.token, "expires_at": sess.expires_at.isoformat(),
                 **self._user_dto(user)}
 
@@ -393,10 +464,13 @@ class FileEvidenceService:
         token = token or self._current_token
         if not token:
             return False
+        username = self._current_user.username if self._current_user else None
         ok = self.sessions.revoke_session(token)
         if token == self._current_token:
             self._current_user = None
             self._current_token = None
+        if username:
+            self.log_entry("auth", f"用户 {username} 退出登录")
         return ok
 
     def current_user(self) -> dict:
@@ -434,6 +508,7 @@ class FileEvidenceService:
         if target.id == user.id and status == "disabled":
             raise ValueError("不能停用当前登录账号")
         self.users.set_status(username, status)
+        self.log_entry("user", f"账号状态变更：{username} → {status}")
         return True
 
     def delete_user(self, username: str, actor=None) -> dict:
@@ -454,6 +529,7 @@ class FileEvidenceService:
             raise ValueError("不能删除当前登录账号")
         if not self.users.delete_user(target.id):
             raise ValueError(f"用户不存在：{username}")
+        self.log_entry("user", f"删除用户：{username}")
         return {"username": username, "id": target.id}
 
     def reset_password(self, username: str, new_password: str, actor=None) -> dict:
@@ -475,13 +551,14 @@ class FileEvidenceService:
         if not self.users.update_password(target.id, password_hash, salt):
             raise ValueError(f"用户不存在：{username}")
         self.sessions.revoke_user_sessions(target.id)
+        self.log_entry("user", f"重置密码：{username}")
         return self._user_dto(self.users.find_by_username(username))
 
     def list_users(self, actor=None) -> list:
-        """用户列表：仅超级管理员可查看。"""
+        """用户列表：超级管理员与管理员可查看（管理员仅用于中心页统计，用户管理页由导航守卫限制）。"""
         user = self._actor(actor)
-        if user is None or user.role != "superadmin":
-            raise PermissionError("仅超级管理员可查看用户列表")
+        if user is None or user.role not in ("admin", "superadmin"):
+            raise PermissionError("仅管理员可查看用户列表")
         return [self._user_dto(u) for u in self.users.list_all()]
 
     def set_user_role(self, username: str, role: str, actor=None) -> dict:
@@ -497,7 +574,61 @@ class FileEvidenceService:
         if target.role == "superadmin":
             raise ValueError("超级管理员账号不可修改")
         self.users.set_role(username, role)
+        self.log_entry("user", f"权限变更：{username} → {role}")
         return self._user_dto(self.users.find_by_username(username))
+
+    # ---------- 操作日志持久化（按用户隔离） ----------
+    USER_ACTION_MODULES = ("evidence", "verify", "search", "decrypt", "report")
+
+    def log_entry(self, module: str, message: str, user_id=None) -> None:
+        """统一写日志入口：用户操作日志记操作人，系统/鉴权日志记 NULL。
+        失败不影响主流程。"""
+        try:
+            if module in self.USER_ACTION_MODULES:
+                if user_id is None and self._current_user is not None:
+                    user_id = self._current_user.id
+            else:
+                # 系统 / 鉴权 / 用户管理日志统一归为系统日志（user_id 为空）
+                user_id = None
+            self.logs.add(module, message, user_id=user_id)
+        except Exception:
+            pass
+
+    def list_logs(self, module: str = None, limit: int = 200, actor=None) -> list:
+        """按角色过滤查询日志：
+        superadmin=全部；admin=本人操作 + 系统日志；user=仅本人操作日志。
+        """
+        user = self._actor(actor)
+        role = user.role if user else None
+        uid = user.id if user else None
+        entries = self.logs.list_for(
+            uid,
+            include_system=role in PRIVILEGED_ROLES,
+            include_all=(role == "superadmin"),
+            module=module,
+            limit=limit,
+        )
+        names = {}
+        for e in entries:
+            if e.user_id and e.user_id not in names:
+                u = self.users.find_by_id(e.user_id)
+                names[e.user_id] = u.username if u else f"#{e.user_id}"
+        return [
+            {"id": e.id, "module": e.module, "message": e.message,
+             "user_id": e.user_id,
+             "operator": names.get(e.user_id) or "系统",
+             "created_at": e.created_at.isoformat() if e.created_at else None}
+            for e in entries
+        ]
+
+    def clear_logs(self, actor=None) -> int:
+        """清空日志：superadmin 清空全部；admin/user 仅清空本人操作日志。"""
+        user = self._actor(actor)
+        if user is None:
+            raise PermissionError("未登录，无法清空日志")
+        if user.role == "superadmin":
+            return self.logs.delete_all()
+        return self.logs.delete_by_user(user.id)
 
     # ---------- 权限归属查询：管理员看全部，普通用户只看自己 ----------
     def _actor(self, actor=None):
@@ -552,6 +683,7 @@ class FileEvidenceService:
         """
         user = self._actor(actor)
         q = (query or "").lower().strip()
+        q_tokens = [t for t in re.split(r"[\s，。、；;：:,]+", q) if t]
 
         # 链上条目：补 evidence_no / block_index / file_id 等（同一指纹可能对应多条 tx，逐条保留）
         chain_events = self.list_chain_evidence()
@@ -616,7 +748,8 @@ class FileEvidenceService:
                 str(file_id or "").lower(), str(file_name or "").lower(),
                 str(semantic or "").lower(), str(contract_hash or "").lower(),
             ])
-            return q in haystack
+            # 自然语言 query 拆成关键词后 OR 匹配（LLM 关闭时的关键词兜底）
+            return any(tok in haystack for tok in q_tokens)
 
         # 1) 链上存证：file_id / file_name / 语义索引 / 指纹 二次校验
         for ev in chain_events:
@@ -758,18 +891,72 @@ class FileEvidenceService:
     @staticmethod
     def _build_semantic_index(filename: str, digest: str, meta: dict) -> str:
         """
-        组装关键词检索索引文本（P0-5 方案 B，如实降级关键词检索）。
+        组装语义索引文本（LLM 开启时生成摘要+关键词，否则走关键词分词兜底）。
         安全边界：只处理 文件名 + meta + 指纹，绝不接触原文 / 密文 / 私钥。
-
-        未来接 LLM 语义增强（方案 A）：把 _extract_semantic_terms 内部替换为
-        LLM 摘要 / 向量化关键词生成，输入仍为 filename + meta（不含敏感原文），
-        调用方与 DAO 层零改动。接口已预留 Hook 点。
+        存储格式：summary|||keyword1,keyword2,...（便于检索时拆分）。
         """
-        terms = FileEvidenceService._extract_semantic_terms(filename, meta)
-        parts = terms + [str(filename), str(digest)]
+        semantic = FileEvidenceService.ai_semantic_index(filename, meta)
+        summary = semantic.get("summary") or ""
+        keywords = semantic.get("keywords") or []
+        parts = [summary] + keywords + [str(filename), str(digest)]
         if meta:
             parts.extend(f"{k}:{v}" for k, v in meta.items())
         return " ".join(p for p in parts if p)
+
+    @staticmethod
+    def ai_semantic_index(filename: str, meta: dict = None) -> dict:
+        """
+        AI 语义索引占位接口：入参为文件名 + 元数据（绝不接触原文 / 密文 / 私钥），
+        返回结构化语义索引 {"summary": str, "keywords": list[str]}。
+
+        - LLM 开启且配置可用时：调用 LLM 生成摘要与关键词；
+        - 否则：走本地关键词分词兜底（_extract_semantic_terms），不报错。
+        """
+        fallback_terms = FileEvidenceService._extract_semantic_terms(filename, meta)
+        if not (config.LLM_ENABLED and config.LLM_API_BASE):
+            return {"summary": filename, "keywords": fallback_terms}
+        try:
+            return FileEvidenceService._call_llm_semantic(filename, meta, fallback_terms)
+        except Exception:
+            # LLM 调用失败时静默降级到关键词兜底，保证主流程不中断
+            return {"summary": filename, "keywords": fallback_terms}
+
+    @staticmethod
+    def _call_llm_semantic(filename: str, meta: dict, fallback_terms: list) -> dict:
+        """调用 LLM 生成语义摘要与关键词（兼容 OpenAI 协议）。"""
+        import json
+        import urllib.request
+        meta_str = "; ".join(f"{k}={v}" for k, v in (meta or {}).items()) if meta else ""
+        prompt = (
+            f"请为以下电子文件生成简短的中文语义摘要（≤30字）和 3-8 个检索关键词。\n"
+            f"文件名：{filename}\n元数据：{meta_str}\n"
+            f"仅返回 JSON：{{\"summary\": \"...\", \"keywords\": [\"...\"]}}"
+        )
+        payload = json.dumps({
+            "model": config.LLM_MODEL,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.3,
+        }).encode("utf-8")
+        headers = {"Content-Type": "application/json"}
+        if config.LLM_API_KEY:
+            headers["Authorization"] = f"Bearer {config.LLM_API_KEY}"
+        req = urllib.request.Request(
+            f"{config.LLM_API_BASE.rstrip('/')}/chat/completions",
+            data=payload, headers=headers, method="POST")
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+        content = body["choices"][0]["message"]["content"]
+        # 提取 JSON 块（兼容模型返回带 ```json 包裹的情况）
+        start = content.find("{")
+        end = content.rfind("}")
+        if start >= 0 and end > start:
+            parsed = json.loads(content[start:end + 1])
+        else:
+            parsed = {}
+        return {
+            "summary": str(parsed.get("summary") or filename),
+            "keywords": [str(k) for k in (parsed.get("keywords") or fallback_terms)],
+        }
 
     @staticmethod
     def _extract_semantic_terms(filename: str, meta: dict = None) -> list:

@@ -87,3 +87,15 @@ class Signer(Base):
     pubkey = Column(String(256), unique=True, nullable=False)      # SM2 公钥（hex）
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
     created_at = Column(DateTime, nullable=False, default=_now)
+
+
+class LogEntry(Base):
+    """操作日志表：按模块持久化，供 GUI 重启后加载历史日志。"""
+
+    __tablename__ = "log_entries"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    module = Column(String(32), nullable=False, index=True)         # system / auth / evidence / verify / search / decrypt / user / report
+    message = Column(Text, nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    created_at = Column(DateTime, nullable=False, default=_now, index=True)

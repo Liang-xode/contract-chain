@@ -44,3 +44,13 @@ CIPHER_STORE_DIR = os.environ.get(
 RECOVERED_DIR = os.environ.get(
     "CONTRACT_CHAIN_RECOVERED_DIR", os.path.join(BASE_DIR, "recovered")
 )
+
+# ---- AI 语义赋能配置 ----
+# 是否启用 LLM 语义索引（关闭时走关键词 LIKE 兜底，不报错）
+LLM_ENABLED = os.environ.get("CONTRACT_CHAIN_LLM_ENABLED", "0") == "1"
+# LLM 服务地址（兼容 OpenAI 协议，如 https://api.openai.com/v1 或本地兼容端点）
+LLM_API_BASE = os.environ.get("CONTRACT_CHAIN_LLM_API_BASE", "")
+# LLM API Key（留空表示匿名/本地端点）
+LLM_API_KEY = os.environ.get("CONTRACT_CHAIN_LLM_API_KEY", "")
+# 语义索引模型名（如 gpt-4o-mini、qwen-plus 等）
+LLM_MODEL = os.environ.get("CONTRACT_CHAIN_LLM_MODEL", "gpt-4o-mini")

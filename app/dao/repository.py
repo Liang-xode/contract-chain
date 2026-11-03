@@ -16,10 +16,12 @@ repository.py —— 仓库（DAO）层：所有数据库读写收口于此
 import secrets
 from datetime import datetime, timedelta
 
+import re
+
 from sqlalchemy import or_
 
 from app.dao.security import hash_password, verify_password
-from app.models import Evidence, LoginSession, Signer, User
+from app.models import Evidence, LogEntry, LoginSession, Signer, User
 
 
 def _now() -> datetime:
@@ -221,15 +223,29 @@ class EvidenceRepository(_BaseRepository):
                     .order_by(Evidence.created_at.desc()).all())
 
     def semantic_search(self, query, limit=20):
-        """语义检索：当前按关键词索引匹配（semantic_index / 文件名 / file_id），预留 AI 向量检索接口。"""
+        """语义检索兜底：把自然语言 query 拆成关键词，对 semantic_index / 文件名 / file_id 做 OR 匹配。
+        AI 向量检索接入点：可在调用前把 query 映射为关键词/向量后复用本方法。
+        """
         if not query:
             return []
-        pattern = f"%{query}%"
+        tokens = [t for t in re.split(r"[\s，。、；;：:,]+", query) if t]
+        if not tokens:
+            tokens = [query]
+
+        def _like(t):
+            return f"%{t}%"
+
+        conds = []
+        for t in tokens:
+            p = _like(t)
+            conds.extend([
+                Evidence.semantic_index.like(p),
+                Evidence.file_name.like(p),
+                Evidence.file_id.like(p),
+            ])
         with self._session() as s:
             return (s.query(Evidence)
-                    .filter(or_(Evidence.semantic_index.like(pattern),
-                                Evidence.file_name.like(pattern),
-                                Evidence.file_id.like(pattern)))
+                    .filter(or_(*conds))
                     .order_by(Evidence.created_at.desc()).limit(limit).all())
 
     def find_by_user(self, user_id):
@@ -283,3 +299,71 @@ class SignerRepository(_BaseRepository):
             return (s.query(Signer)
                     .filter(Signer.user_id == user_id)
                     .order_by(Signer.id).all())
+
+
+class LogRepository(_BaseRepository):
+    """操作日志仓库：按模块持久化，供 GUI 重启后加载历史日志。"""
+
+    def add(self, module, message, user_id=None) -> LogEntry:
+        with self._session() as s:
+            entry = LogEntry(module=module, message=message, user_id=user_id)
+            s.add(entry)
+            s.commit()
+            return entry
+
+    def list_all(self, limit=500):
+        with self._session() as s:
+            return (s.query(LogEntry)
+                    .order_by(LogEntry.created_at.desc())
+                    .limit(limit).all())
+
+    def list_by_module(self, module, limit=500):
+        with self._session() as s:
+            return (s.query(LogEntry)
+                    .filter(LogEntry.module == module)
+                    .order_by(LogEntry.created_at.desc())
+                    .limit(limit).all())
+
+    def list_for(self, user_id=None, include_system=False, include_all=False,
+                 module=None, limit=500):
+        """按权限范围查询日志。
+
+        include_all=True（superadmin）：全部日志；
+        include_system=True（admin）：本人操作日志 + 系统日志（user_id 为空）；
+        否则（普通用户）：仅本人操作日志。
+        """
+        with self._session() as s:
+            q = s.query(LogEntry)
+            if not include_all:
+                if include_system:
+                    # admin：本人操作日志 + 系统日志（user_id 为空），不含他人操作日志
+                    q = q.filter(or_(LogEntry.user_id == user_id,
+                                     LogEntry.user_id.is_(None)))
+                else:
+                    # 普通用户：仅本人操作日志
+                    q = q.filter(LogEntry.user_id == user_id)
+            if module:
+                q = q.filter(LogEntry.module == module)
+            return q.order_by(LogEntry.created_at.desc()).limit(limit).all()
+
+    def delete_by_user(self, user_id):
+        """删除某个用户的操作日志。"""
+        with self._session() as s:
+            n = (s.query(LogEntry)
+                 .filter(LogEntry.user_id == user_id).delete(synchronize_session=False))
+            s.commit()
+            return n
+
+    def delete_system(self):
+        """删除全部系统日志（user_id 为空）。"""
+        with self._session() as s:
+            n = (s.query(LogEntry)
+                 .filter(LogEntry.user_id.is_(None)).delete(synchronize_session=False))
+            s.commit()
+            return n
+
+    def delete_all(self):
+        with self._session() as s:
+            n = s.query(LogEntry).delete(synchronize_session=False)
+            s.commit()
+            return n

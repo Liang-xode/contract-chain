@@ -45,7 +45,8 @@
 }
 QPushButton#btn_nav_sign, QPushButton#btn_nav_verify,
 QPushButton#btn_nav_search, QPushButton#btn_nav_decrypt,
-QPushButton#btn_nav_center, QPushButton#btn_nav_users {
+QPushButton#btn_nav_report, QPushButton#btn_nav_center,
+QPushButton#btn_nav_logs, QPushButton#btn_nav_users {
     background: transparent;
     color: #A9C4DA;
     border: none;
@@ -54,13 +55,15 @@ QPushButton#btn_nav_center, QPushButton#btn_nav_users {
 }
 QPushButton#btn_nav_sign:hover, QPushButton#btn_nav_verify:hover,
 QPushButton#btn_nav_search:hover, QPushButton#btn_nav_decrypt:hover,
-QPushButton#btn_nav_center:hover, QPushButton#btn_nav_users:hover {
+QPushButton#btn_nav_report:hover, QPushButton#btn_nav_center:hover,
+QPushButton#btn_nav_logs:hover, QPushButton#btn_nav_users:hover {
     color: #FFFFFF;
     background: rgba(73, 216, 255, 35);
 }
 QPushButton#btn_nav_sign:checked, QPushButton#btn_nav_verify:checked,
 QPushButton#btn_nav_search:checked, QPushButton#btn_nav_decrypt:checked,
-QPushButton#btn_nav_center:checked, QPushButton#btn_nav_users:checked {
+QPushButton#btn_nav_report:checked, QPushButton#btn_nav_center:checked,
+QPushButton#btn_nav_logs:checked, QPushButton#btn_nav_users:checked {
     color: #FFFFFF;
     background: rgba(33, 200, 246, 60);
 }
@@ -129,12 +132,35 @@ QLabel#lbl_nav_user {
         </widget>
        </item>
        <item>
+        <widget class="QPushButton" name="btn_nav_report">
+         <property name="text">
+          <string>存证报告</string>
+         </property>
+         <property name="checkable">
+          <bool>true</bool>
+         </property>
+        </widget>
+       </item>
+       <item>
         <widget class="QPushButton" name="btn_nav_center">
          <property name="text">
           <string>用户中心</string>
          </property>
          <property name="checkable">
           <bool>true</bool>
+         </property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QPushButton" name="btn_nav_logs">
+         <property name="text">
+          <string>操作日志</string>
+         </property>
+         <property name="checkable">
+          <bool>true</bool>
+         </property>
+         <property name="visible">
+          <bool>false</bool>
          </property>
         </widget>
        </item>
@@ -508,9 +534,15 @@ QLabel#lbl_nav_user {
         </attribute>
         <layout class="QVBoxLayout" name="tab_decrypt_layout"/>
        </widget>
+       <widget class="QWidget" name="tab_report">
+        <attribute name="title">
+         <string>⑤ 存证报告</string>
+        </attribute>
+        <layout class="QVBoxLayout" name="tab_report_layout"/>
+       </widget>
        <widget class="QWidget" name="tab_center">
         <attribute name="title">
-         <string>⑤ 用户中心</string>
+         <string>⑥ 用户中心</string>
         </attribute>
         <layout class="QVBoxLayout" name="tab_center_layout">
          <item>
@@ -836,26 +868,19 @@ QLabel#lbl_nav_user {
              </property>
             </spacer>
            </item>
-           <item>
-            <widget class="QPushButton" name="btn_logout">
-             <property name="styleSheet">
-              <string notr="true">color: #E8463A; border: none;</string>
-             </property>
-             <property name="text">
-              <string>退出当前账号</string>
-             </property>
-             <property name="flat">
-              <bool>true</bool>
-             </property>
-            </widget>
-           </item>
           </layout>
          </item>
         </layout>
        </widget>
+       <widget class="QWidget" name="tab_logs">
+        <attribute name="title">
+         <string>⑦ 操作日志</string>
+        </attribute>
+        <layout class="QVBoxLayout" name="tab_logs_layout"/>
+       </widget>
        <widget class="QWidget" name="tab_users">
         <attribute name="title">
-         <string>⑥ 用户权限管理</string>
+         <string>⑧ 用户权限管理</string>
         </attribute>
         <layout class="QVBoxLayout" name="tab_users_layout">
          <item>
@@ -975,59 +1000,6 @@ QLabel#lbl_nav_user {
          </item>
         </layout>
        </widget>
-      </widget>
-      <widget class="QGroupBox" name="log_group">
-       <property name="title">
-        <string>实时日志</string>
-       </property>
-       <layout class="QVBoxLayout" name="log_layout">
-        <item>
-         <widget class="QPlainTextEdit" name="log_box">
-          <property name="minimumSize">
-           <size>
-            <width>0</width>
-            <height>60</height>
-           </size>
-          </property>
-          <property name="sizePolicy">
-           <sizepolicy hsizetype="Expanding" vsizetype="Expanding">
-            <horstretch>0</horstretch>
-            <verstretch>0</verstretch>
-           </sizepolicy>
-          </property>
-          <property name="maximumBlockCount">
-           <number>3000</number>
-          </property>
-          <property name="readOnly">
-           <bool>true</bool>
-          </property>
-         </widget>
-        </item>
-        <item>
-         <layout class="QHBoxLayout" name="log_btn_row">
-          <item>
-           <spacer name="log_spacer">
-            <property name="orientation">
-             <enum>Qt::Horizontal</enum>
-            </property>
-            <property name="sizeHint" stdset="0">
-             <size>
-              <width>40</width>
-              <height>20</height>
-             </size>
-            </property>
-           </spacer>
-          </item>
-          <item>
-           <widget class="QPushButton" name="btn_clear_log">
-            <property name="text">
-             <string>清空日志</string>
-            </property>
-           </widget>
-          </item>
-         </layout>
-        </item>
-       </layout>
       </widget>
      </widget>
     </item>

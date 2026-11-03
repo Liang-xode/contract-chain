@@ -30,22 +30,26 @@ warnings.filterwarnings("ignore", message="sipPyTypeDict")
 try:
     from PyQt5 import uic
     from PyQt5.QtCore import Qt, QThread, pyqtSignal
-    from PyQt5.QtGui import QFont
+    from PyQt5.QtGui import QColor, QFont, QLinearGradient, QPainter, QPixmap
     from PyQt5.QtWidgets import (
         QAbstractItemView,
         QApplication,
+        QComboBox,
         QDialog,
         QFileDialog,
+        QFrame,
+        QGridLayout,
         QGroupBox,
         QHBoxLayout,
         QHeaderView,
         QLabel,
         QLineEdit,
         QMainWindow,
-        QMessageBox,
+        QPlainTextEdit,
         QPushButton,
         QTableWidget,
         QTableWidgetItem,
+        QTabWidget,
         QVBoxLayout,
         QWidget,
     )
@@ -63,6 +67,7 @@ from crypto import crypto as cc
 from crypto.crypto import KeyStore
 from blockchain.chain import EvidenceChain
 from app import config
+from app import dialogs
 from app.login import LoginDialog
 from app.service import FileEvidenceService
 
@@ -304,6 +309,7 @@ class MainWindow(QMainWindow):
         self.uploader = None                  # 存证签署使用的签名者（= self._account_signer，登录后填充）
         self.auditor = cc.Signer.generate()    # 审计方身份（演示用，可保持随机生成）
         self._file_counter = 0
+        self._apply_theme()                     # 统一深色科技主题 QSS
         self._signed_file = None               # 最近一次签署的 (name, data)
         self._last_file_id = None
         self.tab1_file = None                  # (name, data) → (name, data, digest)
@@ -318,24 +324,37 @@ class MainWindow(QMainWindow):
             "签名(SM2)": self.row_sign,
         }
 
+        # 审计方验证行：动态插入到「签名(SM2)」之后、结论之前
+        self.row_auditor = QLabel('<span style="color:#8A8A93;">○ <b>审计方签名</b>：待检测</span>')
+        self.row_auditor.setWordWrap(True)
+        result_layout = self.result_box.layout()
+        result_layout.insertWidget(
+            result_layout.indexOf(self.lbl_conclusion), self.row_auditor)
+        self.rows["审计方签名"] = self.row_auditor
+
         # 页面改为「导航按钮 + 整页覆盖」：隐藏 QTabWidget 的标签栏，仅保留内容区
         self.tabs.tabBar().setVisible(False)
         self.tabs.setDocumentMode(True)
         self._nav_buttons = [self.btn_nav_sign, self.btn_nav_verify,
                              self.btn_nav_search, self.btn_nav_decrypt,
-                             self.btn_nav_center, self.btn_nav_users]
+                             self.btn_nav_report, self.btn_nav_center,
+                             self.btn_nav_logs, self.btn_nav_users]
         self._admin_ready = False
+
+        self.resize(1200, 760)                 # 大厂风格默认窗口尺寸
+        self._restructure_layout()             # 三区骨架：顶栏 / 左导航 / 主内容 / 状态栏
 
         self._augment_ui()                     # 代码动态创建新增控件（检索 / 解密 / 导出）
         self._bind()                           # 先有控件再绑信号
         self._reset_rows()
         self._load_history()                   # 重启后从本地快照回填历史链上存证
         self._apply_session()                  # 登录态、用户中心、权限页可见性
+        self._refresh_log_view()               # 从数据库加载历史日志填充独立日志页
 
-        self.log("系统就绪：模拟联盟链节点 node-A / node-B / node-C，共识确认数 2")
-        self.log(f"审计方身份已生成，公钥指纹 {self.auditor.pubkey_fingerprint}")
-        self.log("登录后将为您加载/生成专属 SM2 密钥对（本地加密存储，私钥永不入库）")
-        self.log("提示：把任意文件拖入虚线框（或点击选择），自动计算 SM3 指纹")
+        self.log("系统就绪：模拟联盟链节点 node-A / node-B / node-C，共识确认数 2", module="system")
+        self.log(f"审计方身份已生成，公钥指纹 {self.auditor.pubkey_fingerprint}", module="system")
+        self.log("登录后将为您加载/生成专属 SM2 密钥对（本地加密存储，私钥永不入库）", module="auth")
+        self.log("提示：把任意文件拖入虚线框（或点击选择），自动计算 SM3 指纹", module="system")
 
     # ------------------------------------------------------------- 信号绑定
     def _bind(self):
@@ -346,15 +365,19 @@ class MainWindow(QMainWindow):
         self.btn_verify.clicked.connect(self.on_verify)
         self.btn_tamper.clicked.connect(self.on_tamper)
         self.btn_forge.clicked.connect(self.on_forge)
-        self.btn_clear_log.clicked.connect(self.log_box.clear)
+
+        # 独立日志页
+        self.btn_logs_refresh.clicked.connect(self._refresh_log_view)
+        self.btn_logs_clear.clicked.connect(self._clear_logs)
+        self.cmb_log_module.currentIndexChanged.connect(self._refresh_log_view)
 
         # 页面导航：点击按钮整页切换
         for idx, btn in enumerate(self._nav_buttons):
             btn.clicked.connect(lambda _=False, i=idx: self._goto_page(i))
+        self.btn_logout.clicked.connect(self._logout)
 
         # 用户中心
         self.btn_change_pwd.clicked.connect(self._change_password)
-        self.btn_logout.clicked.connect(self._logout)
 
         # 用户权限管理（仅超级管理员可访问该页）
         self.btn_refresh_users.clicked.connect(self._refresh_users)
@@ -384,9 +407,162 @@ class MainWindow(QMainWindow):
             self.lbl_uploader_id.setText("上传方公钥指纹：待登录后加载账号密钥")
         self.lbl_auditor_id.setText(f"审计方公钥指纹：{self.auditor.pubkey_fingerprint}")
 
-        font = self.log_box.font()
-        font.setFamily("Consolas")
-        self.log_box.setFont(font)
+    # ------------------------------------------------------- 主窗口背景绘制
+    def paintEvent(self, event):
+        """主窗口背景：加载 assets/main_bg.png 全窗口拉伸铺底 + 渐变遮罩压暗，
+        保证表格与文字可读；缺失时回退深色渐变（与登录页配色一致）。"""
+        painter = QPainter(self)
+        bg_path = os.path.join(config.BASE_DIR, "app", "assets", "main_bg.png")
+        pixmap = QPixmap(bg_path)
+        if pixmap.isNull():
+            # 回退：深蓝科技渐变
+            grad = QLinearGradient(0, 0, self.width(), self.height())
+            grad.setColorAt(0, QColor("#050D1F"))
+            grad.setColorAt(1, QColor("#0A1E42"))
+            painter.fillRect(self.rect(), grad)
+        else:
+            # 拉伸铺底
+            painter.drawPixmap(self.rect(), pixmap)
+            # 右侧/底部渐变遮罩压暗，提升文字可读性
+            overlay = QLinearGradient(0, 0, self.width(), self.height())
+            overlay.setColorAt(0, QColor(5, 13, 31, 120))
+            overlay.setColorAt(0.5, QColor(5, 13, 31, 160))
+            overlay.setColorAt(1, QColor(5, 13, 31, 210))
+            painter.fillRect(self.rect(), overlay)
+        painter.end()
+
+    # ------------------------------------------------ 三区骨架重构（顶栏 / 左导航 / 状态栏）
+    def _restructure_layout(self):
+        """把 gui.ui 的「横排导航 + 上下分栏」改为大厂风格三区骨架：
+        顶栏（产品名 / 用户 / 退出） + 左侧导航竖栏 + 主内容 + 底部状态栏。
+        保留 gui.ui 中各业务页内容不动，仅重组顶层容器。
+        """
+        root = self.centralwidget.layout()
+        nav_bar = self.nav_bar
+        nav_layout = nav_bar.layout()
+
+        # ---------- 顶栏 ----------
+        self.top_bar = QFrame()
+        self.top_bar.setObjectName("top_bar")
+        self.top_bar.setFixedHeight(52)
+        top_layout = QHBoxLayout(self.top_bar)
+        top_layout.setContentsMargins(20, 0, 20, 0)
+        top_layout.setSpacing(12)
+        brand = QLabel("信链")
+        brand.setObjectName("lbl_brand")
+        brand_sub = QLabel("国密区块链电子文件存证平台")
+        brand_sub.setObjectName("lbl_brand_sub")
+        top_layout.addWidget(brand)
+        top_layout.addWidget(brand_sub)
+        top_layout.addStretch()
+
+        # 当前用户标签移入顶栏
+        nav_layout.removeWidget(self.lbl_nav_user)
+        self.lbl_nav_user.setParent(self.top_bar)
+        top_layout.addWidget(self.lbl_nav_user)
+
+        self.btn_logout = QPushButton("退出登录")
+        self.btn_logout.setObjectName("btn_logout")
+        top_layout.addWidget(self.btn_logout)
+
+        # ---------- 左侧导航竖栏 ----------
+        self.side_nav = QFrame()
+        self.side_nav.setObjectName("side_nav")
+        self.side_nav.setFixedWidth(196)
+        side_layout = QVBoxLayout(self.side_nav)
+        side_layout.setContentsMargins(12, 16, 12, 16)
+        side_layout.setSpacing(6)
+        nav_icons = {
+            "btn_nav_sign": "✎", "btn_nav_verify": "✓", "btn_nav_search": "⌕",
+            "btn_nav_decrypt": "🔓", "btn_nav_report": "▤", "btn_nav_center": "◉",
+            "btn_nav_logs": "☰", "btn_nav_users": "⚙",
+        }
+        for btn in self._nav_buttons:
+            nav_layout.removeWidget(btn)
+            btn.setParent(self.side_nav)
+            btn.setMinimumHeight(40)
+            btn.setAutoExclusive(True)
+            icon = nav_icons.get(btn.objectName())
+            if icon and not btn.text().startswith(icon):
+                btn.setText(f"{icon}  {btn.text()}")
+            side_layout.addWidget(btn)
+        side_layout.addStretch()
+
+        # 移除旧横排导航条
+        root.removeWidget(nav_bar)
+        nav_bar.setParent(None)
+        nav_bar.deleteLater()
+
+        # ---------- 主内容区（右侧 tabs） ----------
+        splitter = self.splitter
+        self.tabs.setParent(None)
+        self.body = QWidget()
+        self.body.setObjectName("body")
+        body_layout = QHBoxLayout(self.body)
+        body_layout.setContentsMargins(16, 16, 16, 12)
+        body_layout.setSpacing(12)
+        body_layout.addWidget(self.side_nav)
+        body_layout.addWidget(self.tabs, 1)
+        splitter.setParent(None)
+        splitter.deleteLater()
+
+        # ---------- 底部状态栏 ----------
+        self.status_bar = QFrame()
+        self.status_bar.setObjectName("status_bar")
+        self.status_bar.setFixedHeight(30)
+        status_layout = QHBoxLayout(self.status_bar)
+        status_layout.setContentsMargins(20, 0, 20, 0)
+        self.lbl_status = QLabel("节点 node-A / node-B / node-C · 链高度 — · 已连接")
+        self.lbl_status.setObjectName("lbl_status")
+        self.lbl_status_version = QLabel("版本 v2.0")
+        self.lbl_status_version.setObjectName("lbl_status_version")
+        status_layout.addWidget(self.lbl_status)
+        status_layout.addStretch()
+        status_layout.addWidget(self.lbl_status_version)
+
+        # ---------- 组装三区 ----------
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        root.addWidget(self.top_bar)
+        root.addWidget(self.body, 1)
+        root.addWidget(self.status_bar)
+
+        # 业务页统一内边距 ≥16，形成卡片化留白
+        for name in ("tab_sign", "tab_verify", "tab_search", "tab_decrypt",
+                     "tab_report", "tab_center", "tab_logs", "tab_users"):
+            page = getattr(self, name, None)
+            if page is not None and page.layout() is not None:
+                page.layout().setContentsMargins(20, 20, 20, 20)
+                page.layout().setSpacing(12)
+
+    def _update_status_bar(self):
+        """刷新底部状态栏：节点 / 链高度 / 连接状态 / 当前用户。"""
+        if not hasattr(self, "lbl_status"):
+            return
+        nodes = " / ".join(self.chain.nodes)
+        user = self.svc.current_user()
+        if user:
+            role = ROLE_NAMES.get(user["role"], user["role"])
+            who = f"{user['display_name']}（{role}）"
+        else:
+            who = "未登录"
+        self.lbl_status.setText(
+            f"节点 {nodes} · 链高度 {self.chain.height()} · 已连接 · 当前用户 {who}")
+
+    # ------------------------------------------------------- 统一深色科技主题
+    def _apply_theme(self):
+        """加载 app/theme.qss 统一深色主题；缺失时回退内置样式。"""
+        qss_path = os.path.join(config.BASE_DIR, "app", "theme.qss")
+        try:
+            with open(qss_path, "r", encoding="utf-8") as f:
+                self.setStyleSheet(f.read())
+        except OSError:
+            self.setStyleSheet(
+                "QWidget { color:#E6F1FF; font-size:13px; }"
+                "QGroupBox { border:1px solid #35A7FF; border-radius:10px; "
+                "background:rgba(10,30,66,160); margin-top:12px; padding:14px; }"
+                "QTableWidget { background:rgba(5,13,31,180); border:1px solid #2E5BBA; }"
+            )
 
     # ------------------------------------------------------- 动态扩充 GUI 控件
     def _augment_ui(self):
@@ -489,16 +665,443 @@ class MainWindow(QMainWindow):
             "QPushButton:hover { background:#21C8F6; }")
         decrypt_layout.addWidget(self.btn_export_report)
 
+        # --- 5) 用户中心：存证统计卡片（按角色展示可查看范围的统计） ---
+        self._build_center_stats()
+
+        # --- 6) 独立「操作日志」页（业务页不再内嵌日志栏） ---
+        self._build_log_page()
+
+        # --- 7) 报告页 UI ---
+        self._build_report_tab()
+
+        # --- 8) 表格统一斑马纹 / 行高 / 排序 ---
+        for table in (self.tbl_search_results, self.tbl_users,
+                      self.tbl_logs, self.tbl_report_evidence):
+            table.setAlternatingRowColors(True)
+            table.verticalHeader().setDefaultSectionSize(36)
+            table.setSortingEnabled(True)
+        self.tbl_search_results.setSortingEnabled(False)   # 检索结果按权限顺序展示
+
+    def _build_center_stats(self):
+        """把用户中心页重构为「身份卡 + 2×2 统计卡网格 + 修改密码卡」的卡片化布局。
+
+        - 身份卡：在账号信息组左侧追加圆形头像占位 + 右侧角色徽标。
+        - 统计卡：2×2 网格，前三张为真实数据（本人存证数 / 可查看存证数 / 最近存证时间），
+          第四张按角色显示「系统用户数」（admin 及以上）或「开发中」占位卡（普通用户）。
+        - 修改密码卡：沿用 .ui 中的 pwd_group。
+        """
+        # ---------- 1) 身份卡：为账号信息组追加头像占位与角色徽标 ----------
+        profile_grid = self.profile_group.layout()
+        # 圆形头像占位（取用户名首字，深色渐变底）
+        self.lbl_center_avatar = QLabel("●")
+        self.lbl_center_avatar.setAlignment(Qt.AlignCenter)
+        self.lbl_center_avatar.setFixedSize(64, 64)
+        self.lbl_center_avatar.setStyleSheet(
+            "QLabel { background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #3E7BFA,stop:1 #21C8F6);"
+            " color:#fff; border-radius:32px; font-size:28px; font-weight:bold; }")
+        self.lbl_center_avatar.setToolTip("账号头像（占位）")
+        profile_grid.addWidget(self.lbl_center_avatar, 0, 2, 5, 1, Qt.AlignTop)
+
+        # 角色徽标（与角色同一行右侧）
+        self.lbl_center_role_badge = QLabel("")
+        self.lbl_center_role_badge.setAlignment(Qt.AlignCenter)
+        self.lbl_center_role_badge.setFixedHeight(22)
+        self.lbl_center_role_badge.setStyleSheet(
+            "QLabel { background:#1DC981; color:#02121f; border-radius:11px; padding:0 12px; font-weight:bold; }")
+        profile_grid.addWidget(self.lbl_center_role_badge, 2, 1, Qt.AlignLeft)
+
+        # ---------- 2) 统计卡 2×2 网格 ----------
+        stats_group = QGroupBox("存证统计")
+        stats_group.setStyleSheet(
+            "QGroupBox { font-weight:bold; border:1px solid #1DC981; border-radius:8px; margin-top:12px; } "
+            "QGroupBox::title { subcontrol-origin: margin; left:12px; padding:0 6px; color:#1DC981; }")
+        grid = QGridLayout()
+        grid.setSpacing(12)
+
+        # 统一卡片样式：深色半透明底 + 左上标题 + 大字号数值
+        card_qss = (
+            "QFrame { background:rgba(13,43,94,180); border:1px solid #2E5BBA; border-radius:8px; }"
+        )
+
+        def make_card(title, value_color="#21C8F6", placeholder=False):
+            card = QFrame()
+            card.setStyleSheet(card_qss)
+            card.setMinimumHeight(96)
+            lay = QVBoxLayout(card)
+            lay.setContentsMargins(14, 12, 14, 12)
+            lbl_title = QLabel(title)
+            lbl_title.setStyleSheet(f"color:{GRAY}; font-size:12px;")
+            lbl_value = QLabel("—")
+            lbl_value.setStyleSheet(
+                f"font-weight:bold; font-size:22px; color:{'#8A8A93' if placeholder else value_color};")
+            lay.addWidget(lbl_title)
+            lay.addWidget(lbl_value)
+            if placeholder:
+                tag = QLabel("开发中")
+                tag.setAlignment(Qt.AlignRight)
+                tag.setStyleSheet("color:#8A8A93; font-size:11px;")
+                lay.addWidget(tag)
+            return card, lbl_value
+
+        # 第 1 张：本人存证数
+        self._card_mine, self.lbl_stats_mine = make_card("本人存证数", "#21C8F6")
+        # 第 2 张：可查看存证数
+        self._card_evidence, self.lbl_stats_evidence = make_card("可查看存证数", "#1DC981")
+        # 第 3 张：最近存证时间
+        self._card_recent, self.lbl_stats_recent = make_card("最近存证时间", "#F0B429")
+        # 第 4 张：系统用户数（admin+）/ 开发中占位（普通用户）
+        self._card_users, self.lbl_stats_users = make_card("系统用户数", "#1DC981")
+        self._card_placeholder, self.lbl_stats_placeholder = make_card(
+            "我的授权记录", placeholder=True)
+
+        grid.addWidget(self._card_mine, 0, 0)
+        grid.addWidget(self._card_evidence, 0, 1)
+        grid.addWidget(self._card_recent, 1, 0)
+        # 第 4 张由 _refresh_center_stats 按角色切换显示
+        grid.addWidget(self._card_users, 1, 1)
+        grid.addWidget(self._card_placeholder, 1, 1)
+        self._card_placeholder.setVisible(False)
+
+        stats_group.setLayout(grid)
+        # 插入到账号信息（index 0）之后、修改密码之前
+        self.center_body_layout.insertWidget(1, stats_group)
+
+        # 范围说明（保留原标签语义，挂在统计组下方）
+        self.lbl_stats_scope = QLabel("统计范围：—")
+        self.lbl_stats_scope.setStyleSheet(f"color:{GRAY};")
+        self.center_body_layout.insertWidget(2, self.lbl_stats_scope)
+
+    def _refresh_center_stats(self):
+        """按当前登录角色刷新中心页统计数据。"""
+        user = self.svc.current_user()
+        if not user:
+            return
+        is_privileged = user["role"] in ("admin", "superadmin")
+
+        # 头像首字
+        name = (user["display_name"] or user["username"] or "?").strip()
+        self.lbl_center_avatar.setText(name[0].upper())
+
+        # 角色徽标
+        role = user["role"]
+        badge_color = {"superadmin": "#E8463A", "admin": "#3E7BFA", "user": "#1DC981"}.get(role, "#1DC981")
+        self.lbl_center_role_badge.setText(ROLE_NAMES.get(role, role))
+        self.lbl_center_role_badge.setStyleSheet(
+            f"QLabel {{ background:{badge_color}; color:#fff; border-radius:11px; padding:0 12px; font-weight:bold; }}")
+
+        # 本人存证数：登录用户本人上传
+        try:
+            mine = self.svc.count_evidence(actor=user["username"])
+        except Exception:
+            mine = 0
+        self.lbl_stats_mine.setText(str(mine))
+
+        # 可查看存证数：按角色范围
+        try:
+            ev_count = self.svc.count_evidence()
+        except Exception:
+            ev_count = 0
+        self.lbl_stats_evidence.setText(str(ev_count))
+
+        # 最近存证时间：取当前用户可查看列表中最新一条
+        recent_ts = self._latest_evidence_ts()
+        self.lbl_stats_recent.setText(recent_ts)
+
+        # 第四张卡：admin+ 显示系统用户数，普通用户显示开发中占位
+        if is_privileged:
+            self._card_users.setVisible(True)
+            self._card_placeholder.setVisible(False)
+            try:
+                user_count = len(self.svc.list_users())
+            except Exception:
+                user_count = 0
+            self.lbl_stats_users.setText(str(user_count))
+            self.lbl_stats_scope.setText("统计范围：系统全部存证")
+        else:
+            self._card_users.setVisible(False)
+            self._card_placeholder.setVisible(True)
+            self.lbl_stats_scope.setText("统计范围：本人上传的存证")
+
+    def _latest_evidence_ts(self) -> str:
+        """取当前登录用户可查看存证中最新一条的时间；无则返回「暂无」。"""
+        try:
+            records = self.svc.list_evidence()
+        except Exception:
+            return "暂无"
+        ts_list = [r.get("created_at") for r in records if r.get("created_at")]
+        if not ts_list:
+            return "暂无"
+        latest = max(ts_list)
+        # created_at 为 ISO 格式字符串，截取到日期
+        return (latest or "").replace("T", " ")[:10] or "暂无"
+
+    def _build_log_page(self):
+        """构建独立「操作日志」页：模块筛选 + 刷新/清空 + 表格（按用户隔离）。"""
+        layout = self.tab_logs.layout()
+
+        hint = QLabel(
+            "日志按账号隔离：普通用户仅见本人操作日志；管理员可见本人操作日志 + 系统日志；"
+            "超级管理员可见全部日志。清空按钮中，超级管理员可清空全部，其余角色仅清空本人操作日志。")
+        hint.setWordWrap(True)
+        hint.setStyleSheet(f"color:{GRAY};")
+        layout.addWidget(hint)
+
+        filter_group = QGroupBox("日志筛选")
+        filter_row = QHBoxLayout()
+        filter_row.addWidget(QLabel("模块："))
+        self.cmb_log_module = QComboBox()
+        self.cmb_log_module.addItem("全部", None)
+        for mod in self.LOG_MODULES:
+            self.cmb_log_module.addItem(self.LOG_MODULE_LABELS.get(mod, mod), mod)
+        filter_row.addWidget(self.cmb_log_module)
+        self.btn_logs_refresh = QPushButton("🔄 刷新")
+        self.btn_logs_clear = QPushButton("🗑 清空可见日志")
+        filter_row.addWidget(self.btn_logs_refresh)
+        filter_row.addWidget(self.btn_logs_clear)
+        filter_row.addStretch()
+        filter_group.setLayout(filter_row)
+        layout.addWidget(filter_group)
+
+        self.tbl_logs = QTableWidget(0, 4)
+        self.tbl_logs.setHorizontalHeaderLabels(["时间", "模块", "操作人", "内容"])
+        self.tbl_logs.setAlternatingRowColors(True)
+        self.tbl_logs.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.tbl_logs.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.tbl_logs.verticalHeader().setVisible(False)
+        self.tbl_logs.setWordWrap(True)
+        self.tbl_logs.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.tbl_logs.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.tbl_logs.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.tbl_logs.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        layout.addWidget(self.tbl_logs, 1)
+
+        self.lbl_logs_msg = QLabel("—")
+        self.lbl_logs_msg.setStyleSheet(f"color:{GRAY};")
+        self.lbl_logs_msg.setWordWrap(True)
+        layout.addWidget(self.lbl_logs_msg)
+
+    def _build_report_tab(self):
+        """构建「存证报告」页：链上存证列表 + 生成报告 + 预览 + 导出。"""
+        layout = self.tab_report.layout()
+        if layout is None:
+            layout = QVBoxLayout(self.tab_report)
+
+        # 顶部：列表区
+        list_group = QGroupBox("① 链上存证列表")
+        list_layout = QVBoxLayout()
+        btn_row = QHBoxLayout()
+        self.btn_report_refresh = QPushButton("🔄 刷新列表")
+        self.btn_report_refresh.setStyleSheet(
+            "QPushButton { background:#2E5BBA; color:#fff; padding:6px 14px; border-radius:4px; }")
+        self.btn_report_generate = QPushButton("📄 生成选中存证的报告")
+        self.btn_report_generate.setStyleSheet(
+            "QPushButton { background:#1DC981; color:#fff; padding:6px 14px; border-radius:4px; }")
+        btn_row.addWidget(self.btn_report_refresh)
+        btn_row.addWidget(self.btn_report_generate)
+        btn_row.addStretch()
+        list_layout.addLayout(btn_row)
+
+        self.tbl_report_evidence = QTableWidget(0, 4)
+        self.tbl_report_evidence.setHorizontalHeaderLabels(["file_id", "存证号", "文件名", "存证时间"])
+        self.tbl_report_evidence.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.tbl_report_evidence.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.tbl_report_evidence.setAlternatingRowColors(True)
+        self.tbl_report_evidence.horizontalHeader().setStretchLastSection(True)
+        list_layout.addWidget(self.tbl_report_evidence)
+        list_group.setLayout(list_layout)
+        layout.addWidget(list_group)
+
+        # 中部：报告预览区
+        preview_group = QGroupBox("② 报告预览")
+        preview_layout = QVBoxLayout()
+        self.txt_report_preview = QPlainTextEdit()
+        self.txt_report_preview.setReadOnly(True)
+        self.txt_report_preview.setMaximumBlockCount(2000)
+        preview_layout.addWidget(self.txt_report_preview)
+        preview_group.setLayout(preview_layout)
+        layout.addWidget(preview_group)
+
+        # 底部：导出按钮
+        export_row = QHBoxLayout()
+        self.btn_report_export_json = QPushButton("💾 导出 JSON")
+        self.btn_report_export_json.setStyleSheet(
+            "QPushButton { background:#3E7BFA; color:#fff; padding:8px 16px; border-radius:4px; }")
+        self.btn_report_export_html = QPushButton("🌐 导出 HTML")
+        self.btn_report_export_html.setStyleSheet(
+            "QPushButton { background:#21C8F6; color:#fff; padding:8px 16px; border-radius:4px; }")
+        export_row.addWidget(self.btn_report_export_json)
+        export_row.addWidget(self.btn_report_export_html)
+        export_row.addStretch()
+        layout.addLayout(export_row)
+
+        self._current_report = None
+        # 连接信号
+        self.btn_report_refresh.clicked.connect(self._refresh_report_list)
+        self.btn_report_generate.clicked.connect(self._generate_report)
+        self.btn_report_export_json.clicked.connect(self._export_report_json)
+        self.btn_report_export_html.clicked.connect(self._export_report_html)
+
+    def _refresh_report_list(self):
+        """刷新报告页的链上存证列表。"""
+        try:
+            history = self.svc.list_chain_evidence()
+        except Exception as exc:
+            self.log(f"✖ 加载存证列表失败：{exc}", module="report")
+            return
+        self.tbl_report_evidence.setSortingEnabled(False)
+        self.tbl_report_evidence.setRowCount(len(history))
+        for row, item in enumerate(history):
+            self.tbl_report_evidence.setItem(row, 0, QTableWidgetItem(item.get("file_id") or ""))
+            ev_no = item.get("evidence_no") or ""
+            self.tbl_report_evidence.setItem(row, 1, QTableWidgetItem(short(ev_no, 14, 6)))
+            self.tbl_report_evidence.setItem(row, 2, QTableWidgetItem(item.get("file_name") or ""))
+            ts = item.get("timestamp")
+            ts_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts)) if ts else ""
+            self.tbl_report_evidence.setItem(row, 3, QTableWidgetItem(ts_str))
+            # 把完整 evidence_no 存到第一列的 UserRole
+            self.tbl_report_evidence.item(row, 0).setData(Qt.UserRole, ev_no)
+        self.tbl_report_evidence.setSortingEnabled(True)
+        self.log(f"报告页已加载 {len(history)} 条链上存证", module="report")
+
+    def _selected_report_evidence_no(self):
+        row = self.tbl_report_evidence.currentRow()
+        if row < 0:
+            return None
+        item = self.tbl_report_evidence.item(row, 0)
+        return item.data(Qt.UserRole) if item else None
+
+    def _generate_report(self):
+        ev_no = self._selected_report_evidence_no()
+        if not ev_no:
+            self.log("⚠ 请先在列表中选中一条存证", module="report")
+            return
+        self.log(f"📄 生成报告：{short(ev_no, 12, 6)} ...", module="report")
+        try:
+            report = self.svc.evidence_report(ev_no)
+        except ValueError as exc:
+            self.log(f"✖ 报告生成失败：{exc}", module="report")
+            return
+        self._current_report = report
+        # 渲染为可读文本预览
+        lines = ["═══════════ 存证凭证报告 ═══════════"]
+        for k, v in report.items():
+            lines.append(f"{k}：{v}")
+        lines.append("═══════════════════════════════════")
+        self.txt_report_preview.setPlainText("\n".join(lines))
+        self.log(f"✅ 报告已生成，含 {len(report)} 个字段", module="report")
+
+    def _export_report_json(self):
+        if not self._current_report:
+            self.log("⚠ 请先生成报告", module="report")
+            return
+        import json as _json
+        suggested = f"evidence_{self._current_report['存证编号'][:12]}.json"
+        path, _ = QFileDialog.getSaveFileName(self, "导出报告 JSON", suggested, "JSON (*.json)")
+        if not path:
+            return
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                _json.dump(self._current_report, f, ensure_ascii=False, indent=2)
+            self.log(f"✅ JSON 报告已保存：{path}", module="report")
+        except OSError as exc:
+            self.log(f"✖ 保存失败：{exc}", module="report")
+
+    def _export_report_html(self):
+        if not self._current_report:
+            self.log("⚠ 请先生成报告", module="report")
+            return
+        suggested = f"evidence_{self._current_report['存证编号'][:12]}.html"
+        path, _ = QFileDialog.getSaveFileName(self, "导出报告 HTML", suggested, "HTML (*.html)")
+        if not path:
+            return
+        rows = "".join(
+            f"<tr><th>{k}</th><td>{v}</td></tr>" for k, v in self._current_report.items())
+        html = (
+            "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+            "<title>存证凭证报告</title>"
+            "<style>body{font-family:'Microsoft YaHei',sans-serif;background:#0A1E42;color:#E6F1FF;margin:24px;}"
+            "h1{color:#1DC981;}table{border-collapse:collapse;width:100%;max-width:720px;margin-top:16px;}"
+            "th,td{border:1px solid #1DC981;padding:8px 12px;text-align:left;}"
+            "th{background:#0D2B5E;color:#1DC981;width:180px;}"
+            "td{word-break:break-all;}</style></head><body>"
+            f"<h1>存证凭证报告</h1><table>{rows}</table></body></html>"
+        )
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(html)
+            self.log(f"✅ HTML 报告已保存：{path}", module="report")
+        except OSError as exc:
+            self.log(f"✖ 保存失败：{exc}", module="report")
+
     # ------------------------------------------------------------- 日志/线程
-    def log(self, msg: str):
-        self.log_box.appendPlainText(f"[{now_ts()}] {msg}")
-        bar = self.log_box.verticalScrollBar()
-        bar.setValue(bar.maximum())
+    # 日志模块定义：用于分区展示与持久化
+    LOG_MODULES = ("system", "auth", "evidence", "verify",
+                   "search", "decrypt", "user", "report")
+    LOG_MODULE_LABELS = {
+        "system": "系统", "auth": "登录/鉴权", "evidence": "存证签署",
+        "verify": "验真溯源", "search": "存证检索", "decrypt": "授权解密",
+        "user": "用户管理", "report": "存证报告",
+    }
+
+    def log(self, msg: str, module: str = "system"):
+        """只写持久化日志并按需刷新独立日志页，不再向业务页输出。"""
+        try:
+            self.svc.log_entry(module, msg)
+        except Exception:
+            pass
+        if getattr(self, "tbl_logs", None) is not None and self.tabs.currentIndex() == 6:
+            self._refresh_log_view()
+
+    def _refresh_log_view(self):
+        """刷新独立日志页：按当前角色权限范围 + 模块筛选加载。"""
+        if getattr(self, "tbl_logs", None) is None:
+            return
+        module = self.cmb_log_module.currentData()
+        try:
+            entries = self.svc.list_logs(module=module, limit=200)
+        except Exception as exc:
+            self.lbl_logs_msg.setText(f"日志加载失败：{exc}")
+            return
+        self.tbl_logs.setSortingEnabled(False)
+        self.tbl_logs.setRowCount(len(entries))
+        for row, e in enumerate(entries):
+            created = (e.get("created_at") or "").replace("T", " ")
+            self.tbl_logs.setItem(row, 0, QTableWidgetItem(created[:19]))
+            self.tbl_logs.setItem(row, 1, QTableWidgetItem(
+                self.LOG_MODULE_LABELS.get(e.get("module"), e.get("module") or "")))
+            self.tbl_logs.setItem(row, 2, QTableWidgetItem(e.get("operator") or "系统"))
+            self.tbl_logs.setItem(row, 3, QTableWidgetItem(e.get("message") or ""))
+        self.tbl_logs.setSortingEnabled(True)
+        user = self.svc.current_user()
+        role = user["role"] if user else None
+        scope = "全部日志" if role == "superadmin" else (
+            "本人操作日志 + 系统日志" if role == "admin" else "本人操作日志")
+        self.lbl_logs_msg.setText(f"当前可见范围：{scope}；共 {len(entries)} 条")
+        bar = self.tbl_logs.verticalScrollBar()
+        bar.setValue(0)
+
+    def _clear_logs(self):
+        """按权限清空日志：superadmin 清空全部，其余角色仅清空本人操作日志。"""
+        user = self.svc.current_user()
+        if not user:
+            return
+        role = user["role"]
+        scope = "全部日志" if role == "superadmin" else "本人操作日志"
+        if not dialogs.confirm(
+                self, "清空日志", f"确认清空{scope}？（此操作不可撤销）"):
+            return
+        try:
+            n = self.svc.clear_logs()
+        except (PermissionError, Exception) as exc:
+            self.lbl_logs_msg.setText(f"清空失败：{exc}")
+            return
+        self._refresh_log_view()
+        self.lbl_logs_msg.setText(f"已清空{scope} {n} 条")
 
     def _start_worker(self, fn, on_ok):
         worker = Worker(fn, self)
         worker.ok.connect(on_ok)
-        worker.fail.connect(lambda msg: self.log(f"✖ 后台任务失败：{msg}"))
+        worker.fail.connect(lambda msg: self.log(f"✖ 后台任务失败：{msg}", module="system"))
         self._workers.append(worker)
         worker.start()
 
@@ -506,7 +1109,7 @@ class MainWindow(QMainWindow):
     def on_sign_file(self, name, data):
         self.tab1_file = (name, data)
         self.lbl_sign_digest.setText("SM3 指纹：计算中…")
-        self.log(f"载入文件 [{name}]（{len(data):,} 字节），后台计算 SM3 指纹…")
+        self.log(f"载入文件 [{name}]（{len(data):,} 字节），后台计算 SM3 指纹…", module="evidence")
         self._start_worker(lambda: cc.sm3_hash(data), self._on_sign_digest)
 
     def _on_sign_digest(self, digest):
@@ -515,28 +1118,28 @@ class MainWindow(QMainWindow):
         name, data = self.tab1_file
         self.tab1_file = (name, data, digest)
         self.lbl_sign_digest.setText(f"SM3 指纹：{digest}")
-        self.log(f"SM3 指纹计算完成：{digest}")
+        self.log(f"SM3 指纹计算完成：{digest}", module="evidence")
 
     def on_sign(self):
         if not self.tab1_file or len(self.tab1_file) < 3:
-            self.log("⚠ 请先上传文件，并等待 SM3 指纹计算完成后再签署")
+            self.log("⚠ 请先上传文件，并等待 SM3 指纹计算完成后再签署", module="evidence")
             return
         if self.uploader is None:
-            self.log("⚠ 账号密钥未就绪 —— 请确认已成功登录；若密钥文件损坏请删除 ~/.xincain/keystore/ 下对应文件后重新登录")
+            self.log("⚠ 账号密钥未就绪 —— 请确认已成功登录；若密钥文件损坏请删除 ~/.xincain/keystore/ 下对应文件后重新登录", module="evidence")
             return
         # 每次签署弹出「存证授权口令」对话框；取消则中止，口令不足 6 位在弹窗内即时拦截
         dlg = PassphraseDialog(self)
         if dlg.exec_() != QDialog.Accepted:
-            self.log("（已取消签署：未设置存证授权口令）")
+            self.log("（已取消签署：未设置存证授权口令）", module="evidence")
             return
         passphrase = dlg.passphrase()
         name, data, digest = self.tab1_file
         self._file_counter += 1
         file_id = f"FILE-{self._file_counter:03d}"
 
-        self.log("―――― 开始签署（使用当前登录账号 SM2 密钥 + PBKDF2 口令加密原文）――――")
-        self.log(f"① SM3 指纹（原文不上链）：{digest}")
-        self.log(f"①-2 签名主体（账号公钥指纹）：{self.uploader.pubkey_fingerprint}")
+        self.log("―――― 开始签署（使用当前登录账号 SM2 密钥 + PBKDF2 口令加密原文）――――", module="evidence")
+        self.log(f"① SM3 指纹（原文不上链）：{digest}", module="evidence")
+        self.log(f"①-2 签名主体（账号公钥指纹）：{self.uploader.pubkey_fingerprint}", module="evidence")
 
         receipt = self.svc.submit_file(
             file_id, name, data, self.uploader, passphrase,
@@ -546,11 +1149,12 @@ class MainWindow(QMainWindow):
         tx = self.chain.query_evidence(ev_no)["transaction"]
 
         self.log(f"② 签名载荷（file_id|指纹|时间戳）："
-                 f"{file_id}|{short(tx['contract_hash'], 12, 6)}|{tx['ts']:.2f}")
-        self.log(f"③ 上传方 SM2 私钥签名（r‖s，128 位 hex）：{short(tx['signature'], 24, 16)}")
+                 f"{file_id}|{short(tx['contract_hash'], 12, 6)}|{tx['ts']:.2f}", module="evidence")
+        self.log(f"③ 上传方 SM2 私钥签名（r‖s，128 位 hex）：{short(tx['signature'], 24, 16)}", module="evidence")
         self.log(f"④ 广播至联盟链 → 共识确认 {receipt['confirmations']}/{len(self.chain.nodes)}，"
-                 f"出块节点 {receipt['validator']}")
-        self.log(f"⑤ 上链完成：存证号 {ev_no}，区块 #{receipt['block_index']}")
+                 f"出块节点 {receipt['validator']}", module="evidence")
+        self.log(f"⑤ 上链完成：存证号 {ev_no}，区块 #{receipt['block_index']}", module="evidence")
+        self._update_status_bar()
 
         self.lbl_sign_result.setText(
             f"✅ 已上链：{name}\n"
@@ -565,12 +1169,12 @@ class MainWindow(QMainWindow):
 
     def on_countersign(self):
         if self._signed_file is None:
-            self.log("⚠ 尚无已签署文件，请先点击「签署并上链」")
+            self.log("⚠ 尚无已签署文件，请先点击「签署并上链」", module="evidence")
             return
         name, data = self._signed_file
         result = self.svc.add_signer(self._last_file_id, name, data, self.auditor)
         ev_no = result["receipt"]["evidence_no"]
-        self.log(f"审计方追加签认完成：主体 {result['signer']}，存证号 {ev_no}")
+        self.log(f"审计方追加签认完成：主体 {result['signer']}，存证号 {ev_no}", module="evidence")
         self._register_evidence(ev_no, f"{name}（审计签认）")
 
     def _register_evidence(self, ev_no, filename, quiet=False):
@@ -578,7 +1182,7 @@ class MainWindow(QMainWindow):
         self.cmb_evidence.addItem(label, ev_no)
         self.cmb_evidence.setCurrentIndex(self.cmb_evidence.count() - 1)
         if not quiet:
-            self.log(f"存证已加入验真列表：{label}")
+            self.log(f"存证已加入验真列表：{label}", module="evidence")
 
     def _load_history(self):
         """启动时从本地快照恢复的历史链上存证：回填验真下拉框，避免重启后看不到历史。"""
@@ -595,12 +1199,17 @@ class MainWindow(QMainWindow):
         if self.cmb_evidence.count():
             self.cmb_evidence.setCurrentIndex(self.cmb_evidence.count() - 1)
         self.log(f"已从本地快照恢复 {len(history)} 条历史链上存证，链高度 {self.chain.height()}"
-                 "（重启不再丢失，可直接验真 / 解密）")
+                 "（重启不再丢失，可直接验真 / 解密）", module="system")
 
     # --------------------------------------------- 页面导航 / 登录态
     def _goto_page(self, index: int):
-        """跳转页面：整页覆盖显示，不做多标签并列。"""
-        if index == 5 and self.btn_nav_users.isHidden():
+        """跳转页面：整页覆盖显示，不做多标签并列。带页访问守卫。"""
+        # 页访问守卫：users 页（index 7）仅 superadmin；
+        # logs 页（index 6）对所有登录用户开放（内容仍按 user_id 隔离）
+        user = self.svc.current_user()
+        role = user["role"] if user else None
+        if index == 7 and role != "superadmin":
+            dialogs.warn(self, "无权限", "仅超级管理员可访问用户权限管理页")
             return
         self.tabs.setCurrentIndex(index)
         for i, btn in enumerate(self._nav_buttons):
@@ -609,6 +1218,12 @@ class MainWindow(QMainWindow):
             # 进入检索页默认做一次空检索，展示当前登录用户可查看的存证列表
             self.edt_search.clear()
             self.on_search(quiet=True)
+        elif index == 4:
+            # 进入报告页自动刷新链上存证列表
+            self._refresh_report_list()
+        elif index == 6:
+            # 进入日志页刷新历史日志
+            self._refresh_log_view()
 
     def _apply_session(self, announce=True, password=None):
         """把当前登录用户同步到标题、导航栏、账号密钥、用户中心与权限页可见性。"""
@@ -640,10 +1255,11 @@ class MainWindow(QMainWindow):
                 self.log(
                     f"🔐 已为账号 [{user['username']}] {'加载' if self._keystore.exists(user['username']) else '生成'} "
                     f"专属 SM2 密钥对（本地加密文件：{self._keystore._path(user['username'])}，"
-                    f"公钥指纹 {self._account_signer.pubkey_fingerprint}）"
+                    f"公钥指纹 {self._account_signer.pubkey_fingerprint}）",
+                    module="auth"
                 )
             except ValueError as exc:
-                self.log(f"⚠ 账号密钥加载失败：{exc}；存证将无法使用本账号签名")
+                self.log(f"⚠ 账号密钥加载失败：{exc}；存证将无法使用本账号签名", module="auth")
                 self._account_signer = None
                 self.uploader = None
         elif self._account_signer is not None:
@@ -651,13 +1267,33 @@ class MainWindow(QMainWindow):
             self.lbl_uploader_id.setText(
                 f"上传方公钥指纹：{self.uploader.pubkey_fingerprint}（账号 {user['username']}）")
 
-        is_super = user["role"] == "superadmin"
+        # ---- 导航可见性矩阵（按角色控制 8 个导航按钮显隐） ----
+        role = user["role"]
+        is_super = role == "superadmin"
+        is_admin_or_above = role in ("admin", "superadmin")
+        # superadmin: 全部可见；admin / user: 隐藏 users；logs 对所有角色可见（内容按 user_id 隔离）
         self.btn_nav_users.setVisible(is_super)
+        self.btn_nav_logs.setVisible(True)
+        # sign / verify / search / decrypt / report / center 所有角色均可见
+
+        # ---- 用户管理页操作按钮按角色细化 ----
+        # superadmin: 可改角色、启停/删除、重置密码；admin: 仅可重置密码
+        admin_only_btns = (self.btn_make_admin, self.btn_make_user,
+                           self.btn_enable_user, self.btn_disable_user,
+                           self.btn_delete_user)
+        for btn in admin_only_btns:
+            btn.setEnabled(is_super)
+        self.btn_reset_user_pwd.setEnabled(is_admin_or_above)
+
         if is_super:
             self._setup_user_admin()
             self._refresh_users()
-        elif self.tabs.currentIndex() == 5:
+        elif self.tabs.currentIndex() == 7:
             self._goto_page(0)
+
+        # ---- 中心页统计：按角色展示可查看范围的存证统计 ----
+        self._refresh_center_stats()
+        self._update_status_bar()
 
         self._clear_pwd_fields()
         self.lbl_pwd_msg.clear()
@@ -665,7 +1301,7 @@ class MainWindow(QMainWindow):
             self.on_search(quiet=True)         # 登录态变化后刷新「可查看存证」列表
         if announce:
             self.log(f"当前登录用户：{user['display_name']}（{user['username']} / {role}），"
-                     "本次存证将归属该账号")
+                     "本次存证将归属该账号", module="auth")
 
     def _clear_pwd_fields(self):
         for edt in (self.edt_old_pwd, self.edt_new_pwd, self.edt_new_pwd2):
@@ -696,19 +1332,77 @@ class MainWindow(QMainWindow):
         user = self.svc.current_user()
         self._clear_pwd_fields()
         self._set_pwd_msg("密码修改成功，下次登录请使用新密码", ok=True)
-        self.log(f"账号 {user['username'] if user else ''} 修改密码成功（PBKDF2 重新加盐哈希）")
+        self.log(f"账号 {user['username'] if user else ''} 修改密码成功（PBKDF2 重新加盐哈希）", module="auth")
+
+    def _reset_ui_for_login(self):
+        """登出后清空所有业务页残留数据，复位到登录前的干净状态，再弹出登录框。"""
+        # 基本登录态复位：清空账号密钥与上传方指纹（current_user 已为 None）
+        self._apply_session(announce=False)
+
+        # 顶栏用户标签与窗口标题复位
+        self.lbl_nav_user.setText("未登录")
+        self.setWindowTitle("信链 · 未登录")
+
+        # 导航可见性复位：未登录时隐藏「用户权限管理」，其余入口可见
+        self.btn_nav_users.setVisible(False)
+        for btn in self._nav_buttons:
+            if btn is not self.btn_nav_users:
+                btn.setVisible(True)
+
+        # 清空各业务表数据，避免上一账号的残留数据被下一账号看到
+        for tbl in (self.tbl_search_results, self.tbl_logs,
+                    self.tbl_report_evidence, self.tbl_users):
+            tbl.setRowCount(0)
+
+        # 清空验真下拉与结论行
+        self.cmb_evidence.clear()
+        self._reset_rows()
+
+        # 用户中心统计标签复位
+        if hasattr(self, "lbl_stats_scope"):
+            self.lbl_stats_scope.setText("统计范围：—")
+        for attr in ("lbl_stats_mine", "lbl_stats_evidence",
+                     "lbl_stats_recent", "lbl_stats_users",
+                     "lbl_stats_placeholder"):
+            lbl = getattr(self, attr, None)
+            if lbl is not None:
+                lbl.setText("—")
+        if hasattr(self, "lbl_center_avatar"):
+            self.lbl_center_avatar.setText("●")
+        if hasattr(self, "lbl_center_role_badge"):
+            self.lbl_center_role_badge.setText("")
+        if hasattr(self, "_card_placeholder"):
+            self._card_placeholder.setVisible(False)
+
+        # 清空检索 / 解密结果与输入
+        self.edt_search.clear()
+        self.lbl_search_summary.setText("当前显示可查看的 0 条存证")
+        self.edt_decrypt_file_id.clear()
+        self.edt_decrypt_passphrase.clear()
+        self.lbl_decrypt_result.setText("— 输入 file_id + 口令后点击按钮 —")
+        self.lbl_decrypt_result.setStyleSheet(f"color:{GRAY}; padding:6px;")
+        self._last_recovered = None
+        self.btn_save_recovered.setEnabled(False)
+
+        # 清空报告预览
+        if hasattr(self, "txt_report_preview"):
+            self.txt_report_preview.clear()
+        self._current_report = None
+
+        # 复位到首页并刷新状态栏
+        self._goto_page(0)
+        self._update_status_bar()
 
     def _logout(self):
         user = self.svc.current_user()
         if not user:
             return
-        answer = QMessageBox.question(
-            self, "退出登录", "退出后需要重新输入账号密码，确定继续？",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if answer != QMessageBox.Yes:
+        if not dialogs.confirm(
+                self, "退出登录", "退出后需要重新输入账号密码，确定继续？"):
             return
-        self.log(f"用户 {user['display_name']} 退出登录")
+        self.log(f"用户 {user['display_name']} 退出登录", module="auth")
         self.svc.logout()
+        self._reset_ui_for_login()          # 清空业务页残留，避免下一账号看到上一账号数据
         dlg = LoginDialog(self.svc, self)
         if dlg.exec_() != QDialog.Accepted:
             self.close()
@@ -740,6 +1434,7 @@ class MainWindow(QMainWindow):
         except (PermissionError, ValueError) as exc:
             self._set_users_msg(f"无法加载用户列表：{exc}", ok=False)
             return
+        self.tbl_users.setSortingEnabled(False)
         self.tbl_users.setRowCount(len(users))
         for row, u in enumerate(users):
             name_item = QTableWidgetItem(u["username"])
@@ -751,6 +1446,7 @@ class MainWindow(QMainWindow):
                 STATUS_NAMES.get(u["status"], u["status"])))
             created = (u.get("created_at") or "").replace("T", " ")[:19]
             self.tbl_users.setItem(row, 3, QTableWidgetItem(created))
+        self.tbl_users.setSortingEnabled(True)
         self._set_users_msg(
             f"共 {len(users)} 个账号；选中一行后可调整角色 / 启用或停用 / 重置密码 / 删除",
             ok=True)
@@ -762,21 +1458,19 @@ class MainWindow(QMainWindow):
             return
         username = self.tbl_users.item(item.row(), 0).text()
         role_name = ROLE_NAMES.get(role, role)
-        answer = QMessageBox.question(
-            self, "确认修改权限", f"确定将用户「{username}」设为{role_name}？",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if answer != QMessageBox.Yes:
+        if not dialogs.confirm(
+                self, "确认修改权限", f"确定将用户「{username}」设为{role_name}？"):
             return
         try:
             info = self.svc.set_user_role(username, role)
         except (PermissionError, ValueError) as exc:
             self._set_users_msg(f"修改失败：{exc}", ok=False)
-            self.log(f"权限变更失败：{username} → {role_name}（{exc}）")
+            self.log(f"权限变更失败：{username} → {role_name}（{exc}）", module="user")
             return
         new_role = ROLE_NAMES.get(info["role"], info["role"])
         self._refresh_users()
         self._set_users_msg(f"已将「{username}」设为{new_role}", ok=True)
-        self.log(f"权限变更：{username} → {new_role}")
+        self.log(f"权限变更：{username} → {new_role}", module="user")
 
     def _selected_username(self):
         """取用户列表当前选中行的用户名；未选中时提示并返回 None。"""
@@ -793,44 +1487,40 @@ class MainWindow(QMainWindow):
             return
         label = "启用" if status == "enabled" else "停用"
         extra = "" if status == "enabled" else "（停用后该账号将无法登录）"
-        answer = QMessageBox.question(
-            self, f"确认{label}", f"确定{label}账号「{username}」？{extra}",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if answer != QMessageBox.Yes:
+        if not dialogs.confirm(
+                self, f"确认{label}", f"确定{label}账号「{username}」？{extra}"):
             return
         try:
             self.svc.set_user_status(username, status)
         except (PermissionError, ValueError) as exc:
             self._set_users_msg(f"{label}失败：{exc}", ok=False)
-            self.log(f"账号{label}失败：{username}（{exc}）")
+            self.log(f"账号{label}失败：{username}（{exc}）", module="user")
             return
         self._refresh_users()
         self._set_users_msg(f"已{label}账号「{username}」", ok=True)
-        self.log(f"账号状态变更：{username} → {STATUS_NAMES.get(status, status)}")
+        self.log(f"账号状态变更：{username} → {STATUS_NAMES.get(status, status)}", module="user")
 
     def _delete_user(self):
         """删除选中账号（二次确认；存证本体保留，归属清空）。"""
         username = self._selected_username()
         if not username:
             return
-        answer = QMessageBox.warning(
-            self, "确认删除用户",
-            f"确定永久删除账号「{username}」？\n\n"
-            "• 该账号的登录态立即失效\n"
-            "• 其存证记录本体保留，仅清空归属（上传账号显示为未登录匿名存证）\n"
-            "• 此操作不可撤销",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if answer != QMessageBox.Yes:
+        if not dialogs.confirm(
+                self, "确认删除用户",
+                f"确定永久删除账号「{username}」？\n\n"
+                "• 该账号的登录态立即失效\n"
+                "• 其存证记录本体保留，仅清空归属（上传账号显示为未登录匿名存证）\n"
+                "• 此操作不可撤销"):
             return
         try:
             self.svc.delete_user(username)
         except (PermissionError, ValueError) as exc:
             self._set_users_msg(f"删除失败：{exc}", ok=False)
-            self.log(f"删除用户失败：{username}（{exc}）")
+            self.log(f"删除用户失败：{username}（{exc}）", module="user")
             return
         self._refresh_users()
         self._set_users_msg(f"已删除账号「{username}」（存证记录保留）", ok=True)
-        self.log(f"删除用户：{username}（账号已物理删除，存证本体保留、归属清空）")
+        self.log(f"删除用户：{username}（账号已物理删除，存证本体保留、归属清空）", module="user")
 
     def _reset_user_password(self):
         """为选中账号代重置密码（无需原密码，重置后其登录态失效）。"""
@@ -839,17 +1529,17 @@ class MainWindow(QMainWindow):
             return
         dlg = ResetPasswordDialog(username, self)
         if dlg.exec_() != QDialog.Accepted:
-            self.log(f"（已取消重置密码：{username}）")
+            self.log(f"（已取消重置密码：{username}）", module="user")
             return
         try:
             self.svc.reset_password(username, dlg.new_password())
         except (PermissionError, ValueError) as exc:
             self._set_users_msg(f"重置密码失败：{exc}", ok=False)
-            self.log(f"重置密码失败：{username}（{exc}）")
+            self.log(f"重置密码失败：{username}（{exc}）", module="user")
             return
         self._refresh_users()
         self._set_users_msg(f"已重置账号「{username}」的密码", ok=True)
-        self.log(f"重置密码：{username}（PBKDF2 重新加盐哈希，其登录态已失效）")
+        self.log(f"重置密码：{username}（PBKDF2 重新加盐哈希，其登录态已失效）", module="user")
 
     def _set_users_msg(self, text, ok=True):
         self.lbl_users_msg.setText(text)
@@ -859,26 +1549,26 @@ class MainWindow(QMainWindow):
     def on_verify_file(self, name, data):
         self.tab2_file = (name, data)
         self.lbl_verify_digest.setText("本地 SM3 指纹：计算中…")
-        self.log(f"验真页载入文件 [{name}]（{len(data):,} 字节），计算 SM3 指纹…")
+        self.log(f"验真页载入文件 [{name}]（{len(data):,} 字节），计算 SM3 指纹…", module="verify")
         self._start_worker(lambda: cc.sm3_hash(data), self._on_verify_digest)
 
     def _on_verify_digest(self, digest):
         self.lbl_verify_digest.setText(f"本地 SM3 指纹：{digest}")
-        self.log(f"验真文件 SM3 指纹：{digest}")
+        self.log(f"验真文件 SM3 指纹：{digest}", module="verify")
 
     def _selected_evidence(self):
         ev_no = self.cmb_evidence.currentData()
         if not ev_no:
-            self.log("⚠ 链上暂无存证记录，请先在「存证与签署」页完成签署")
+            self.log("⚠ 链上暂无存证记录，请先在「存证与签署」页完成签署", module="verify")
         return ev_no
 
     def _candidate(self):
         if self.tab2_file:
             return self.tab2_file[1]
         if self.tab1_file and len(self.tab1_file) >= 3:
-            self.log("（验真页未载入文件，自动使用存证页当前文件）")
+            self.log("（验真页未载入文件，自动使用存证页当前文件）", module="verify")
             return self.tab1_file[1]
-        self.log("⚠ 请先载入待验真的文件")
+        self.log("⚠ 请先载入待验真的文件", module="verify")
         return None
 
     def _reset_rows(self):
@@ -908,8 +1598,22 @@ class MainWindow(QMainWindow):
                           checks["签名(SM2)"].splitlines()[0])
         else:
             self._set_row("签名(SM2)", None, "未检测（完整性已失败）")
+        # 审计方签名验证：通过=绿 / 失败=红 / 未检测=灰
+        audit_msg = checks.get("审计方签名", "未检测：暂无审计方追加签认")
+        if audit_msg.startswith("通过"):
+            self._set_row("审计方签名", True, audit_msg.splitlines()[0])
+        elif audit_msg.startswith("失败"):
+            self._set_row("审计方签名", False, audit_msg.splitlines()[0])
+        else:
+            self._set_row("审计方签名", None, audit_msg.splitlines()[0])
         if v["passed"]:
-            self.lbl_conclusion.setText("🎉 验真通过：文件完整、签名有效、存证可信")
+            multi = v.get("multi_sign_ok", False)
+            if multi:
+                tail = "；多方签认闭环达成（上传方 + 审计方均有效）"
+            else:
+                tail = "；暂无审计方追加签认（多方签认未闭环）"
+            self.lbl_conclusion.setText(
+                f"🎉 验真通过：文件完整、签名有效、存证可信{tail}")
             self.lbl_conclusion.setStyleSheet(f"color:{GREEN}; font-weight:bold; font-size:15px;")
         else:
             self.lbl_conclusion.setText(f"❌ 验真未通过：{v.get('reason', '校验失败')}")
@@ -922,11 +1626,11 @@ class MainWindow(QMainWindow):
         data = self._candidate()
         if data is None:
             return
-        self.log(f"――― 三重验真：{short(ev_no, 12, 6)} ―――")
+        self.log(f"――― 三重验真：{short(ev_no, 12, 6)} ―――", module="verify")
         result = self.svc.verify(ev_no, data)
         self._apply_verify(result)
         self.log("验真结论：" + ("通过 ✅" if result["passed"]
-                                else f"未通过 ❌（{result.get('reason', '')}）"))
+                                else f"未通过 ❌（{result.get('reason', '')}）"), module="verify")
 
     def on_tamper(self):
         ev_no = self._selected_evidence()
@@ -936,11 +1640,11 @@ class MainWindow(QMainWindow):
         if data is None:
             return
         tampered = data[:-1] + bytes([data[-1] ^ 0xFF])
-        self.log("攻击模拟：翻转文件最后 1 个字节（异或 0xFF）")
+        self.log("攻击模拟：翻转文件最后 1 个字节（异或 0xFF）", module="verify")
         result = self.svc.verify(ev_no, tampered)
         self._apply_verify(result)
         if not result["passed"]:
-            self.log(f"攻击结果：篡改被识别 ❌ —— {result.get('reason', '')}")
+            self.log(f"攻击结果：篡改被识别 ❌ —— {result.get('reason', '')}", module="verify")
 
     def on_forge(self):
         ev_no = self._selected_evidence()
@@ -955,14 +1659,15 @@ class MainWindow(QMainWindow):
         verifier = cc.Signer.from_public_key(tx["pubkey"])
         valid = verifier.verify(forged, payload)
 
-        self.log("攻击模拟：攻击者用自己的私钥对同一载荷签名，冒充上传方")
-        self.log(f"伪造者公钥指纹：{forger.pubkey_fingerprint}")
-        self.log(f"用真实上传方公钥验签伪造签名 → {'通过（异常！）' if valid else '失败'}，冒充被识破")
+        self.log("攻击模拟：攻击者用自己的私钥对同一载荷签名，冒充上传方", module="verify")
+        self.log(f"伪造者公钥指纹：{forger.pubkey_fingerprint}", module="verify")
+        self.log(f"用真实上传方公钥验签伪造签名 → {'通过（异常！）' if valid else '失败'}，冒充被识破", module="verify")
 
         on_chain = self.chain.query_evidence(ev_no)
         self._set_row("链上存证", True, f"通过：存在，区块 #{on_chain['block']['index']}")
         self._set_row("完整性(SM3)", True, "通过：文件未被篡改")
         self._set_row("签名(SM2)", False, "失败：伪造签名无效（签名主体不可信）")
+        self._set_row("审计方签名", None, "未检测（攻击演示场景）")
         self.lbl_conclusion.setText("🛡 攻击被拦截：伪造签名无法通过真实上传方公钥验签 —— 不可否认性有效")
         self.lbl_conclusion.setStyleSheet("font-weight:bold; font-size:15px;")
 
@@ -975,7 +1680,7 @@ class MainWindow(QMainWindow):
             results = self.svc.search_evidence(query)
         except Exception as exc:
             self.lbl_search_summary.setText("检索失败，请查看日志")
-            self.log(f"✖ 检索失败：{type(exc).__name__}: {exc}")
+            self.log(f"✖ 检索失败：{type(exc).__name__}: {exc}", module="search")
             return
         self.tbl_search_results.setRowCount(len(results))
         for row, r in enumerate(results):
@@ -991,14 +1696,14 @@ class MainWindow(QMainWindow):
         if query:
             summary = f"「{query}」命中的 {len(results)} 条存证（当前可查看范围内）"
             if not quiet:
-                self.log(f"🔍 关键词检索：「{query}」（按当前登录用户权限过滤）")
+                self.log(f"🔍 关键词检索：「{query}」（按当前登录用户权限过滤）", module="search")
         else:
             summary = f"当前显示可查看的 {len(results)} 条存证"
             if not quiet:
-                self.log(f"📋 已载入可查看存证 {len(results)} 条（按当前登录用户权限过滤）")
+                self.log(f"📋 已载入可查看存证 {len(results)} 条（按当前登录用户权限过滤）", module="search")
         self.lbl_search_summary.setText(summary)
         if not quiet:
-            self.log(f"检索完成，命中 {len(results)} 条；双击一行可自动填入解密区")
+            self.log(f"检索完成，命中 {len(results)} 条；双击一行可自动填入解密区", module="search")
 
     def _on_search_double_clicked(self, index):
         row = index.row()
@@ -1012,31 +1717,31 @@ class MainWindow(QMainWindow):
         self.edt_decrypt_file_id.setText(file_id)
         ev_no = data.get("evidence_no") or ""
         self._goto_page(3)                     # 跳到「授权解密」页，便于直接输入口令
-        self.log(f"📌 从检索结果取 file_id={file_id}（ev_no={short(ev_no, 12, 6)}），请输入解密口令")
+        self.log(f"📌 从检索结果取 file_id={file_id}（ev_no={short(ev_no, 12, 6)}），请输入解密口令", module="search")
 
     # ------------------------------------------- 授权解密还原 → 验真闭环（P0-1 + P0-4）
     def _pick_file_id_from_current(self):
         """从验真页选中的存证（cmb_evidence）反查链上 file_id，填入解密区。"""
         ev_no = self.cmb_evidence.currentData()
         if not ev_no:
-            self.log("⚠ 验真页未选中任何存证")
+            self.log("⚠ 验真页未选中任何存证", module="decrypt")
             return
         on_chain = self.chain.query_evidence(ev_no)
         if not on_chain:
-            self.log(f"⚠ 链上找不到存证 {short(ev_no, 12, 6)}")
+            self.log(f"⚠ 链上找不到存证 {short(ev_no, 12, 6)}", module="decrypt")
             return
         extra = on_chain["transaction"].get("extra") or ""
         file_id, _, _ = extra.partition("|")
         self.edt_decrypt_file_id.setText(file_id)
-        self.log(f"📌 从链上存证 {short(ev_no, 12, 6)} 解析到 file_id={file_id}")
+        self.log(f"📌 从链上存证 {short(ev_no, 12, 6)} 解析到 file_id={file_id}", module="decrypt")
 
     def on_decrypt_and_verify(self):
         file_id = self.edt_decrypt_file_id.text().strip()
         passphrase = self.edt_decrypt_passphrase.text()
         if not file_id or not passphrase:
-            self.log("⚠ 请先填写 file_id 和存证口令")
+            self.log("⚠ 请先填写 file_id 和存证口令", module="decrypt")
             return
-        self.log(f"🔓 开始解密并验真闭环：file_id={file_id} ...（后台执行，不卡界面）")
+        self.log(f"🔓 开始解密并验真闭环：file_id={file_id} ...（后台执行，不卡界面）", module="decrypt")
         self.btn_decrypt_verify.setEnabled(False)
 
         def _do():
@@ -1048,7 +1753,7 @@ class MainWindow(QMainWindow):
                 msg = result.get("error", "未知错误")
                 self.lbl_decrypt_result.setText(f"❌ 解密失败：{msg}")
                 self.lbl_decrypt_result.setStyleSheet("color:#E8463A; padding:6px;")
-                self.log(f"✖ 解密失败：{msg}")
+                self.log(f"✖ 解密失败：{msg}", module="decrypt")
                 self._last_recovered = None
                 self.btn_save_recovered.setEnabled(False)
                 return
@@ -1081,7 +1786,7 @@ class MainWindow(QMainWindow):
             )
             self.lbl_decrypt_result.setStyleSheet(f"color:{color}; padding:6px;")
             self.log(f"🔓 {verdict}：{filename} 解密 {size:,} 字节，"
-                     f"链上存证号 {short(ev_no, 12, 6) if ev_no else '—'}")
+                     f"链上存证号 {short(ev_no, 12, 6) if ev_no else '—'}", module="decrypt")
             # 自动弹「另存为」对话框，引导保存明文
             self._save_recovered_interactive(auto=True)
 
@@ -1090,22 +1795,22 @@ class MainWindow(QMainWindow):
     def _save_recovered_interactive(self, auto: bool = False):
         """把最近一次解密成功的明文保存到本地；auto=True 表示解密成功后自动触发。"""
         if not self._last_recovered:
-            self.log("⚠ 暂无已解密的明文可保存")
+            self.log("⚠ 暂无已解密的明文可保存", module="decrypt")
             return
         filename, data = self._last_recovered
         suggested = filename or "recovered.bin"
         path, _ = QFileDialog.getSaveFileName(
             self, "保存还原明文", suggested, "所有文件 (*)")
         if not path:
-            self.log("（已取消保存明文）" if auto else "（用户取消保存明文）")
+            self.log("（已取消保存明文）" if auto else "（用户取消保存明文）", module="decrypt")
             return
         try:
             saved = self.svc.save_recovered_file(filename, data, target_path=path)
         except OSError as exc:
-            self.log(f"✖ 保存明文失败：{exc}")
+            self.log(f"✖ 保存明文失败：{exc}", module="decrypt")
             return
-        self.log(f"✅ 明文已保存至：{saved}（{len(data):,} 字节）")
-        self.log("   提示：可到「验真溯源」页载入该文件，重算 SM3 与链上指纹比对")
+        self.log(f"✅ 明文已保存至：{saved}（{len(data):,} 字节）", module="decrypt")
+        self.log("   提示：可到「验真溯源」页载入该文件，重算 SM3 与链上指纹比对", module="decrypt")
         self.lbl_decrypt_result.setText(
             self.lbl_decrypt_result.text() +
             f"\n💾 明文已保存：{saved}"
@@ -1119,20 +1824,20 @@ class MainWindow(QMainWindow):
     def on_export_report(self):
         ev_no = self.cmb_evidence.currentData()
         if not ev_no:
-            self.log("⚠ 请先在「验真溯源」页选中一个链上存证（cmb_evidence 下拉框）")
+            self.log("⚠ 请先在「验真溯源」页选中一个链上存证（cmb_evidence 下拉框）", module="report")
             return
-        self.log(f"📄 生成证据报告：{short(ev_no, 12, 6)} ...")
+        self.log(f"📄 生成证据报告：{short(ev_no, 12, 6)} ...", module="report")
         try:
             report = self.svc.evidence_report(ev_no)
         except ValueError as exc:
-            self.log(f"✖ 报告生成失败：{exc}")
+            self.log(f"✖ 报告生成失败：{exc}", module="report")
             return
 
         suggested = f"evidence_{ev_no[:12]}.json"
         path, _ = QFileDialog.getSaveFileName(
             self, "导出证据报告", suggested, "JSON 文件 (*.json);;所有文件 (*)")
         if not path:
-            self.log("（用户取消保存）")
+            self.log("（用户取消保存）", module="report")
             return
 
         import json as _json
@@ -1140,10 +1845,10 @@ class MainWindow(QMainWindow):
             with open(path, "w", encoding="utf-8") as f:
                 _json.dump(report, f, ensure_ascii=False, indent=2)
         except OSError as exc:
-            self.log(f"✖ 写入文件失败：{exc}")
+            self.log(f"✖ 写入文件失败：{exc}", module="report")
             return
-        self.log(f"✅ 证据报告已保存：{path}")
-        self.log(f"   含字段：存证编号 / 文件指纹 / 存证主体 / 签名值 / 区块高度 / 区块哈希 / 出块节点 / 存证时间 / 共识确认数")
+        self.log(f"✅ 证据报告已保存：{path}", module="report")
+        self.log(f"   含字段：存证编号 / 文件指纹 / 存证主体 / 签名值 / 区块高度 / 区块哈希 / 出块节点 / 存证时间 / 共识确认数", module="report")
 
 
 def main():
