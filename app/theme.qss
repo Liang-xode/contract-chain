@@ -203,6 +203,34 @@ QWidget#tab_logs, QWidget#tab_users {
     border-radius: 12px;
 }
 
+/* ---------- 用户中心滚动区：保持深色底，避免浅色视口破坏对比度 ---------- */
+QScrollArea#center_scroll {
+    background: transparent;
+    border: none;
+}
+
+QScrollArea#center_scroll > QWidget > QWidget {
+    background: transparent;
+}
+
+QScrollArea#center_scroll QWidget#qt_scrollarea_viewport {
+    background: transparent;
+}
+
+QWidget#center_body {
+    background: transparent;
+}
+
+/* 用户中心：字段标题用高对比浅蓝，值用纯白 */
+QWidget#tab_center QLabel#lbl_center_username_cap,
+QWidget#tab_center QLabel#lbl_center_display_cap,
+QWidget#tab_center QLabel#lbl_center_role_cap,
+QWidget#tab_center QLabel#lbl_center_status_cap,
+QWidget#tab_center QLabel#lbl_center_created_cap {
+    color: #9CC3E8;
+}
+
+
 /* ---------- 日志页 Tab（保留兼容） ---------- */
 QTabWidget::pane {
     border: 1px solid rgba(53, 167, 255, 60);

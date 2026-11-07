@@ -28,6 +28,8 @@ from crypto import crypto as cc
 from blockchain.chain import Block, EvidenceChain, Transaction
 
 from app import config
+from app import embedding, semantic_store
+from app.text_extract import extract_text
 from app.dao import (
     CipherStore,
     EvidenceRepository,
@@ -92,6 +94,8 @@ class FileEvidenceService:
         meta 可携带文件名、类型、大小、归属单位等描述信息。
         """
         digest = cc.sm3_hash(raw_content)                      # 1) SM3 指纹
+        # 1b) 路线 A：加密前在本机内存抽取正文节选，仅用于生成语义索引（绝不落库/不随密文外发）
+        content_text = extract_text(filename, raw_content)
         salt = cc.random_salt(16)                              # 2) 每份文件独立随机盐
         session_key = cc.derive_sm4_key_v2(passphrase, salt)   # 3) PBKDF2 高强度 KDF
         cipher = cc.sm4_encrypt(session_key, raw_content)     # 4) SM4 加密原文
@@ -115,15 +119,18 @@ class FileEvidenceService:
 
         # 8) 持久化（DAO）：只存 指纹/公钥/签名/链哈希/语义索引/密文路径，不含原文与私钥
         uploader_id = self._current_user.id if self._current_user else None
+        semantic_index = self._build_semantic_index(filename, digest, meta, content_text)
         self.evidence.save_evidence(
             file_id=file_id,
             file_sha256=digest, file_name=filename,
             signer_pubkey=uploader.public_key, signature=signature,
             chain_hash=receipt["block_hash"],
-            semantic_index=self._build_semantic_index(filename, digest, meta),
+            semantic_index=semantic_index,
             uploader_id=uploader_id,
             cipher_path=cipher_path,
         )
+        # 8b) 路线 B：把语义索引映射为向量并写入本地向量库（派生数据，失败静默降级）
+        self._index_semantic_vector(digest, semantic_index)
         self.signers.register(self._signer_name(meta), uploader.public_key, uploader_id)
 
         # 9) 内存态仅保留密文路径 + 随机盐（会话密钥由口令 + 盐派生，不落盘）
@@ -438,6 +445,235 @@ class FileEvidenceService:
             "语义摘要": semantic_index or "（无）",
         }
 
+    # ---------- 5.1 两种报告模板的数据组装 ----------
+    @staticmethod
+    def _split_semantic(index_text: str):
+        """把 semantic_index（summary|||kw|||类别|||...）拆成三元组。"""
+        if not index_text:
+            return "", [], ""
+        parts = [p.strip() for p in str(index_text).split("|||")]
+        summary = parts[0] if parts else ""
+        kws = [t.strip() for t in (parts[1] if len(parts) > 1 else "").split(",") if t.strip()]
+        cat = parts[2] if len(parts) > 2 else ""
+        return summary, kws, cat
+
+    def _chain_context(self, evidence_no: str):
+        """取链上交易与本地文件记录（用于报告补全文件名/规格/归属）。"""
+        on_chain = self.chain.query_evidence(evidence_no)
+        if on_chain is None:
+            raise ValueError("存证不存在")
+        tx = on_chain["transaction"]
+        parts = (tx.get("extra") or "").split("|")
+        file_id = parts[0] if parts else ""
+        file_name = parts[1] if len(parts) > 1 else file_id
+        rec = self._files.get(file_id) or {}
+        meta = rec.get("meta") or {}
+        return on_chain, tx, file_id, file_name, meta
+
+    def _semantic_of(self, digest: str):
+        """按指纹取 AI 语义索引并拆解；失败返回空三元组。"""
+        try:
+            records = self.evidence.find_by_fingerprint(digest)
+            if records:
+                return self._split_semantic(records[0].semantic_index)
+        except Exception:
+            pass
+        return "", [], ""
+
+    @staticmethod
+    def _file_spec(file_name: str, meta: dict) -> str:
+        ext = os.path.splitext(file_name or "")[1].lower() or "无扩展名"
+        size = (meta or {}).get("大小") or (meta or {}).get("size")
+        return "%s%s" % (ext, (" / %s" % size) if size else "")
+
+    def receipt_report(self, evidence_no: str) -> dict:
+        """存证凭证：一页回执，回答"何时、何人、以何指纹写入了哪个区块"。"""
+        on_chain, tx, file_id, file_name, meta = self._chain_context(evidence_no)
+        summary, kws, cat = self._semantic_of(tx["contract_hash"])
+        ts_text = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(tx["ts"]))
+        return {
+            "存证编号": evidence_no,
+            "文件名称": file_name,
+            "文件规格": self._file_spec(file_name, meta),
+            "文件指纹(SM3)": tx["contract_hash"],
+            "存证主体(公钥指纹)": tx["signer_fp"],
+            "签名值(SM2)": tx["signature"],
+            "区块高度": on_chain["block"]["index"],
+            "区块哈希": on_chain["block"]["hash"],
+            "出块节点": on_chain["block"]["validator"],
+            "存证时间": ts_text,
+            "共识确认数": self.chain.confirmations.get(evidence_no),
+            "语义摘要": summary,
+            "语义关键词": kws,
+            "语义类别": cat,
+            "凭证编号": "CH-PZ-%s-%s" % (time.strftime("%Y%m%d"), evidence_no[-8:]),
+            "出具时间": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "结论": "该文件已于 %s 完成 SM3 指纹计算并经 SM2 签名写入联盟链区块 #%s，"
+                    "存证记录当前不可篡改。" % (ts_text, on_chain["block"]["index"]),
+        }
+
+    def proof_report(self, evidence_no: str, candidate: bytes = None) -> dict:
+        """证据报告：分章节的鉴定式报告，含三重校验与声明。
+
+        candidate 为待核验文件明文时做完整三重校验；为 None 时仅核验链上存在性与签名，
+        并把"完整性"如实标注为未核验（不臆断为通过）。
+        """
+        on_chain, tx, file_id, file_name, meta = self._chain_context(evidence_no)
+        summary, kws, cat = self._semantic_of(tx["contract_hash"])
+        ts_text = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(tx["ts"]))
+
+        signer = cc.Signer.from_public_key(tx["pubkey"])
+        payload = f"{file_id}|{tx['contract_hash']}|{tx['ts']}".encode()
+        uploader_ok = signer.verify(tx["signature"], payload)
+        audit = self._verify_auditor_signatures(
+            file_id, tx["contract_hash"], tx["signer_fp"], uploader_ok=uploader_ok)
+
+        checks = {"链上存证": "通过：存在，区块 #%s" % on_chain["block"]["index"]}
+        reason = ""
+        if candidate is not None:
+            recalculated = cc.sm3_hash(candidate)
+            integrity_ok = recalculated == tx["contract_hash"]
+            if integrity_ok:
+                checks["完整性(SM3)"] = "通过：文件未被篡改"
+                integrity = "通过：重算指纹与链上一致"
+            else:
+                checks["完整性(SM3)"] = "失败：哈希不匹配（链上 %s / 本地 %s）" % (
+                    tx["contract_hash"], recalculated)
+                integrity = "失败：文件内容与链上指纹不一致"
+                reason = "文件内容被修改，SM3 指纹与链上不一致"
+        else:
+            recalculated = ""
+            integrity_ok = None            # 未核验 ≠ 通过
+            integrity = "未核验：未提供待核验文件，仅完成链上与签名核验"
+            checks["完整性(SM3)"] = integrity
+
+        checks["签名(SM2)"] = ("通过：主体 %s 签名有效" % tx["signer_fp"]) if uploader_ok \
+            else "失败：签名无效（签名主体不可信）"
+        if not uploader_ok:
+            reason = reason or "SM2 签名验证失败，签认行为不可信"
+
+        # passed 只表示「三重校验全部通过」；未提供原件时完整性未核验，不得判 True
+        passed = bool(uploader_ok and integrity_ok is True)
+        if passed:
+            conclusion_ok = True
+        elif uploader_ok and integrity_ok is None:
+            conclusion_ok = None           # 部分核验：结论框用中性色，不冒充通过
+        else:
+            conclusion_ok = False
+
+        if audit["auditor_signed"]:
+            checks["审计方签名"] = "通过：审计方 %s 签认有效" % audit["auditor_fingerprint"]
+            audit_text = "通过：审计方签认有效"
+        elif audit["auditor_fingerprint"]:
+            checks["审计方签名"] = "失败：审计方 %s 签认无效" % audit["auditor_fingerprint"]
+            audit_text = "失败：审计方签认无效"
+        else:
+            checks["审计方签名"] = "未检测：暂无审计方追加签认"
+            audit_text = "未检测：暂无审计方追加签认"
+
+        if passed:
+            conclusion = ("经核验，该电子文件重算 SM3 指纹与链上存证一致，SM2 签名有效，"
+                          "存证真实存在于联盟链区块 #%s，未发现篡改或伪造迹象。" % on_chain["block"]["index"])
+        elif uploader_ok and integrity_ok is None:
+            conclusion = ("部分核验通过：链上存证与 SM2 签名核验有效（区块 #%s）；本次未提供待核验文件，"
+                          "文件内容一致性未作核验，须由持有原件方另行复核，本报告不就此作出肯定结论。"
+                          % on_chain["block"]["index"])
+        else:
+            conclusion = "核验未通过：%s" % (reason or "签名或链上记录校验失败")
+
+        return {
+            "存证编号": evidence_no,
+            "文件名称": file_name,
+            "文件规格": self._file_spec(file_name, meta),
+            "归属单位": (meta or {}).get("归属单位") or "",
+            "文件指纹(SM3)": tx["contract_hash"],
+            "重算指纹": recalculated,
+            "完整性结论": integrity,
+            "存证主体(公钥指纹)": tx["signer_fp"],
+            "签名值(SM2)": tx["signature"],
+            "验签结论": checks["签名(SM2)"],
+            "区块高度": on_chain["block"]["index"],
+            "区块哈希": on_chain["block"]["hash"],
+            "出块节点": on_chain["block"]["validator"],
+            "存证时间": ts_text,
+            "共识确认数": self.chain.confirmations.get(evidence_no),
+            "审计方指纹": audit["auditor_fingerprint"] or "",
+            "审计签认结论": audit_text,
+            "语义摘要": summary,
+            "语义关键词": kws,
+            "语义类别": cat,
+            "checks": checks,
+            "chain_ok": bool(uploader_ok),
+            "integrity_ok": integrity_ok,
+            "passed": passed,
+            "conclusion_ok": conclusion_ok,
+            "结论": conclusion,
+            "报告编号": "CH-ZJ-%s-%s" % (time.strftime("%Y%m%d"), evidence_no[-8:]),
+            "出具时间": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "出具方": "信链存证系统",
+        }
+
+    # ---------- 5.2 AI 语义面板（供 GUI「AI 语义」页读取） ----------
+    def semantic_status(self) -> dict:
+        """AI 能力当前状态：开关、模型、凭据是否就绪、向量库规模。"""
+        from app import embedding, semantic_store
+        return {
+            "llm_enabled": bool(config.LLM_ENABLED),
+            "llm_model": config.LLM_MODEL,
+            "api_base": config.LLM_API_BASE,
+            "key_ready": bool(config.LLM_API_KEY),
+            "reads_content": bool(getattr(config, "SEMANTIC_LLM_READS_CONTENT", True)),
+            "max_chars": int(getattr(config, "SEMANTIC_CONTENT_MAX_CHARS", 2000)),
+            "embedding_enabled": bool(getattr(config, "EMBEDDING_ENABLED", False)),
+            "embedding_model": getattr(config, "EMBEDDING_MODEL", ""),
+            "embedding_ready": embedding.is_available(),
+            "vector_count": semantic_store.count(),
+        }
+
+    def list_semantic_indexes(self, limit: int = 50) -> list:
+        """列出已入库的 AI 语义索引（仅派生信息，不含原文）。"""
+        out = []
+        try:
+            for rec in self.evidence.find_all(limit=limit):
+                summary, kws, cat = self._split_semantic(rec.semantic_index)
+                if not (summary or kws or cat):
+                    continue
+                out.append({
+                    "file_name": rec.file_name,
+                    "digest": rec.file_sha256,
+                    "summary": summary,
+                    "keywords": kws,
+                    "category": cat,
+                })
+        except Exception:
+            pass
+        return out
+
+    def semantic_probe(self, query: str, top_k: int = 3) -> dict:
+        """语义试检索：返回 query 向量维度与 top-k 相似度（不写日志、不改数据）。"""
+        from app import embedding, semantic_store
+        query = (query or "").strip()
+        if not query:
+            return {"ok": False, "reason": "请输入检索语句"}
+        if not embedding.is_available():
+            return {"ok": False, "reason": "向量能力未就绪（需 LLM_API_KEY）"}
+        qv = embedding.embed(query)
+        if not qv:
+            return {"ok": False, "reason": "向量化失败（网络或额度问题）"}
+        hits = semantic_store.search(qv, top_k=top_k)
+        names = {}
+        try:
+            for rec in self.evidence.find_all(limit=200):
+                names[rec.file_sha256] = rec.file_name
+        except Exception:
+            pass
+        return {
+            "ok": True,
+            "dim": len(qv),
+            "hits": [{"score": round(s, 4), "digest": k,
+                      "file_name": names.get(k) or "（未在本地库登记）"} for k, s in hits],
+        }
+
     # ======================================================================
     # 6. 用户 / 登录 / 登出（新增入口，全部经 DAO）
     # ======================================================================
@@ -661,6 +897,47 @@ class FileEvidenceService:
             return self.evidence.count(user.id)
         return len(self.evidence.find_by_user(None))
 
+    @staticmethod
+    def _index_semantic_vector(digest: str, semantic_index: str) -> bool:
+        """路线 B：把语义索引文本映射为向量写入本地向量库（失败静默降级）。"""
+        if not digest or not semantic_index or not embedding.is_available():
+            return False
+        try:
+            vec = embedding.embed(semantic_index)
+            if not vec:
+                return False
+            semantic_store.put(digest, semantic_index, vec)
+            return True
+        except Exception:
+            return False
+
+    def _vector_recall(self, query: str, top_k: int = 20,
+                       min_score: float = 0.25) -> dict:
+        """
+        路线 B：向量语义召回。把 query 映射为向量，与本地向量库做余弦相似度，
+        返回 {SM3指纹: 相似度}。任何失败（未启用/无 Key/网络异常）都返回空 dict，
+        由上层自然降级为纯关键词检索，不影响主流程。
+
+        阈值策略：绝对下限 min_score + 相对阈值（top1 × 55%），
+        既避免固定阈值过严漏召回，也避免无关条目混入。
+        """
+        if not query or not embedding.is_available():
+            return {}
+        try:
+            qv = embedding.embed(query)
+        except Exception:
+            return {}
+        if not qv:
+            return {}
+        try:
+            hits = semantic_store.search(qv, top_k=top_k)
+        except Exception:
+            return {}
+        if not hits:
+            return {}
+        floor = max(min_score, hits[0][1] * 0.55)
+        return {key: score for key, score in hits if score >= floor}
+
     def search_evidence(self, query: str, actor=None) -> list:
         """
         存证检索（P0-5 方案 B，如实降级，预留 LLM 语义扩展）。
@@ -684,6 +961,8 @@ class FileEvidenceService:
         user = self._actor(actor)
         q = (query or "").lower().strip()
         q_tokens = [t for t in re.split(r"[\s，。、；;：:,]+", q) if t]
+        # 路线 B：先做一次向量语义召回（失败则空 dict，自动退回纯关键词）
+        vector_hits = self._vector_recall(q)
 
         # 链上条目：补 evidence_no / block_index / file_id 等（同一指纹可能对应多条 tx，逐条保留）
         chain_events = self.list_chain_evidence()
@@ -743,13 +1022,22 @@ class FileEvidenceService:
                 return True
             return uploader_id == user.id
 
-        def hit(file_id, file_name, semantic, contract_hash):
+        def match_kind(file_id, file_name, semantic, contract_hash):
+            """返回命中方式：keyword / vector / ''（不命中）。"""
             haystack = " ".join([
                 str(file_id or "").lower(), str(file_name or "").lower(),
                 str(semantic or "").lower(), str(contract_hash or "").lower(),
             ])
-            # 自然语言 query 拆成关键词后 OR 匹配（LLM 关闭时的关键词兜底）
-            return any(tok in haystack for tok in q_tokens)
+            # 1) 关键词子串匹配（LLM 关闭时也可用）
+            if any(tok in haystack for tok in q_tokens):
+                return "keyword"
+            # 2) 向量语义召回（路线 B）：指纹命中说明语义相近，即使没有共同字面
+            if str(contract_hash or "").lower() in vector_hits:
+                return "vector"
+            return ""
+
+        def hit(file_id, file_name, semantic, contract_hash):
+            return bool(match_kind(file_id, file_name, semantic, contract_hash))
 
         # 1) 链上存证：file_id / file_name / 语义索引 / 指纹 二次校验
         for ev in chain_events:
@@ -759,7 +1047,8 @@ class FileEvidenceService:
                 continue
             file_id = ev.get("file_id") or hash_to_file_id.get(contract_hash) or ""
             file_name = ev.get("file_name") or ""
-            if not hit(file_id, file_name, hash_to_semantic.get(contract_hash), contract_hash):
+            kind = match_kind(file_id, file_name, hash_to_semantic.get(contract_hash), contract_hash)
+            if not kind:
                 continue
             results.append({
                 "evidence_no": ev.get("evidence_no"),
@@ -770,6 +1059,8 @@ class FileEvidenceService:
                 "uploader_username": uploader_name(uploader_id),
                 "block_index": ev.get("block_index"),
                 "ts": ev.get("ts"),
+                "match": kind,
+                "score": vector_hits.get(contract_hash, 0.0),
             })
 
         # 2) 本机存证库中未上链的历史记录（如早期演示数据）：同样按关键词 + 权限返回
@@ -779,7 +1070,8 @@ class FileEvidenceService:
             if not allowed(r.uploader_id):
                 continue
             file_id = r.file_id or ""
-            if not hit(file_id, r.file_name, r.semantic_index, r.file_sha256):
+            kind = match_kind(file_id, r.file_name, r.semantic_index, r.file_sha256)
+            if not kind:
                 continue
             results.append({
                 "evidence_no": None,
@@ -790,6 +1082,8 @@ class FileEvidenceService:
                 "uploader_username": uploader_name(r.uploader_id),
                 "block_index": None,
                 "ts": r.created_at,
+                "match": kind,
+                "score": vector_hits.get(r.file_sha256, 0.0),
             })
         return results
 
@@ -826,6 +1120,7 @@ class FileEvidenceService:
                     "file_name": fname or file_id,
                     "block_index": blk["index"],
                     "ts": tx["ts"],
+                    "timestamp": tx["ts"],     # 与 ts 同值，供 UI 统一读取
                     "contract_hash": tx["contract_hash"],
                     "signer_fp": tx["signer_fp"],
                 })
@@ -889,48 +1184,79 @@ class FileEvidenceService:
 
     # ---------- 内部小工具 ----------
     @staticmethod
-    def _build_semantic_index(filename: str, digest: str, meta: dict) -> str:
+    def _build_semantic_index(filename: str, digest: str, meta: dict,
+                              content_text: str = None) -> str:
         """
-        组装语义索引文本（LLM 开启时生成摘要+关键词，否则走关键词分词兜底）。
-        安全边界：只处理 文件名 + meta + 指纹，绝不接触原文 / 密文 / 私钥。
-        存储格式：summary|||keyword1,keyword2,...（便于检索时拆分）。
+        组装语义索引文本（LLM 开启时生成摘要+关键词+类别，否则走关键词分词兜底）。
+
+        安全边界（路线 A 的核心）：
+        - content_text 是「加密前在本机内存中抽取的正文节选」，只作为 LLM 的输入，
+          **绝不落库、绝不写入链状态、绝不与密文/私钥一起外发**；
+        - 是否把节选发给 LLM 由 config.SEMANTIC_LLM_READS_CONTENT 控制（默认开）；
+        - 落库的只有 summary / keywords / category 这层非敏感派生信息。
+
+        存储格式：summary|||keyword1,keyword2|||类别|||文件名|||指纹|||k:v ...
         """
-        semantic = FileEvidenceService.ai_semantic_index(filename, meta)
+        semantic = FileEvidenceService.ai_semantic_index(filename, meta, content_text)
         summary = semantic.get("summary") or ""
         keywords = semantic.get("keywords") or []
-        parts = [summary] + keywords + [str(filename), str(digest)]
+        category = semantic.get("category") or ""
+        segments = [summary]
+        if keywords:
+            segments.append(",".join(keywords))
+        if category:
+            segments.append(str(category))
+        segments.append(str(filename))
+        segments.append(str(digest))
         if meta:
-            parts.extend(f"{k}:{v}" for k, v in meta.items())
-        return " ".join(p for p in parts if p)
+            segments.append(" ".join(f"{k}:{v}" for k, v in meta.items()))
+        return "|||".join(s for s in segments if s)
 
     @staticmethod
-    def ai_semantic_index(filename: str, meta: dict = None) -> dict:
+    def ai_semantic_index(filename: str, meta: dict = None,
+                          content_text: str = None) -> dict:
         """
-        AI 语义索引占位接口：入参为文件名 + 元数据（绝不接触原文 / 密文 / 私钥），
-        返回结构化语义索引 {"summary": str, "keywords": list[str]}。
+        AI 语义索引：入参为 文件名 + 元数据（+ 可选正文节选），
+        返回 {"summary": str, "keywords": list[str], "category": str}。
 
-        - LLM 开启且配置可用时：调用 LLM 生成摘要与关键词；
-        - 否则：走本地关键词分词兜底（_extract_semantic_terms），不报错。
+        - LLM 开启且配置可用：调用 LLM 生成摘要/关键词/类别（可读正文节选）；
+        - 否则：走本地关键词分词兜底，不报错。
+        - 正文节选仅在 SEMANTIC_LLM_READS_CONTENT=True 时才会被告知 LLM。
         """
         fallback_terms = FileEvidenceService._extract_semantic_terms(filename, meta)
-        if not (config.LLM_ENABLED and config.LLM_API_BASE):
-            return {"summary": filename, "keywords": fallback_terms}
+        # 无 Key 时不发起网络请求（避免无谓等待与超时），直接走关键词兜底
+        if not (config.LLM_ENABLED and config.LLM_API_BASE and config.LLM_API_KEY):
+            return {"summary": filename, "keywords": fallback_terms, "category": ""}
+        body = None
+        if content_text and getattr(config, "SEMANTIC_LLM_READS_CONTENT", True):
+            body = content_text
         try:
-            return FileEvidenceService._call_llm_semantic(filename, meta, fallback_terms)
+            return FileEvidenceService._call_llm_semantic(
+                filename, meta, fallback_terms, body)
         except Exception:
             # LLM 调用失败时静默降级到关键词兜底，保证主流程不中断
-            return {"summary": filename, "keywords": fallback_terms}
+            return {"summary": filename, "keywords": fallback_terms, "category": ""}
 
     @staticmethod
-    def _call_llm_semantic(filename: str, meta: dict, fallback_terms: list) -> dict:
-        """调用 LLM 生成语义摘要与关键词（兼容 OpenAI 协议）。"""
+    def _call_llm_semantic(filename: str, meta: dict, fallback_terms: list,
+                           content_text: str = None) -> dict:
+        """调用 LLM 生成语义摘要/关键词/类别（兼容 OpenAI 协议）。"""
         import json
         import urllib.request
         meta_str = "; ".join(f"{k}={v}" for k, v in (meta or {}).items()) if meta else ""
+        body_part = ""
+        if content_text:
+            body_part = (
+                "\n正文节选（仅用于生成摘要，请概括而不要照抄全文）：\n"
+                f"{content_text[:2000]}\n"
+            )
         prompt = (
-            f"请为以下电子文件生成简短的中文语义摘要（≤30字）和 3-8 个检索关键词。\n"
-            f"文件名：{filename}\n元数据：{meta_str}\n"
-            f"仅返回 JSON：{{\"summary\": \"...\", \"keywords\": [\"...\"]}}"
+            f"你是电子文件语义索引助手。请根据下列信息生成中文语义索引。\n"
+            f"文件名：{filename}\n元数据：{meta_str}\n{body_part}"
+            f"要求：summary 为不超过 40 字的内容概括（需体现文件主题与用途）；"
+            f"keywords 为 5-8 个检索关键词（优先取正文中的核心名词/术语）；"
+            f"category 取以下之一：合同/论文/报告/图纸/源码/病历/公文/其他。\n"
+            f"仅返回 JSON：{{\"summary\": \"...\", \"keywords\": [\"...\"], \"category\": \"...\"}}"
         )
         payload = json.dumps({
             "model": config.LLM_MODEL,
@@ -943,7 +1269,7 @@ class FileEvidenceService:
         req = urllib.request.Request(
             f"{config.LLM_API_BASE.rstrip('/')}/chat/completions",
             data=payload, headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:
             body = json.loads(resp.read().decode("utf-8"))
         content = body["choices"][0]["message"]["content"]
         # 提取 JSON 块（兼容模型返回带 ```json 包裹的情况）
@@ -956,6 +1282,7 @@ class FileEvidenceService:
         return {
             "summary": str(parsed.get("summary") or filename),
             "keywords": [str(k) for k in (parsed.get("keywords") or fallback_terms)],
+            "category": str(parsed.get("category") or ""),
         }
 
     @staticmethod

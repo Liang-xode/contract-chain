@@ -30,10 +30,11 @@ warnings.filterwarnings("ignore", message="sipPyTypeDict")
 try:
     from PyQt5 import uic
     from PyQt5.QtCore import Qt, QThread, pyqtSignal
-    from PyQt5.QtGui import QColor, QFont, QLinearGradient, QPainter, QPixmap
+    from PyQt5.QtGui import QBrush, QColor, QFont, QLinearGradient, QPainter, QPixmap
     from PyQt5.QtWidgets import (
         QAbstractItemView,
         QApplication,
+        QCheckBox,
         QComboBox,
         QDialog,
         QFileDialog,
@@ -68,6 +69,7 @@ from crypto.crypto import KeyStore
 from blockchain.chain import EvidenceChain
 from app import config
 from app import dialogs
+from app import report_export
 from app.login import LoginDialog
 from app.service import FileEvidenceService
 
@@ -324,9 +326,10 @@ class MainWindow(QMainWindow):
             "签名(SM2)": self.row_sign,
         }
 
-        # 审计方验证行：动态插入到「签名(SM2)」之后、结论之前
-        self.row_auditor = QLabel('<span style="color:#8A8A93;">○ <b>审计方签名</b>：待检测</span>')
+        # 审计方验证行：动态插入到「签名(SM2)」之后、结论之前；默认隐藏，仅有审计方签认时才显示
+        self.row_auditor = QLabel("")
         self.row_auditor.setWordWrap(True)
+        self.row_auditor.setVisible(False)
         result_layout = self.result_box.layout()
         result_layout.insertWidget(
             result_layout.indexOf(self.lbl_conclusion), self.row_auditor)
@@ -345,6 +348,7 @@ class MainWindow(QMainWindow):
         self._restructure_layout()             # 三区骨架：顶栏 / 左导航 / 主内容 / 状态栏
 
         self._augment_ui()                     # 代码动态创建新增控件（检索 / 解密 / 导出）
+        self._mount_ai_page()                  # 新增「AI 语义」导航项与页面（须在 _bind 前）
         self._bind()                           # 先有控件再绑信号
         self._reset_rows()
         self._load_history()                   # 重启后从本地快照回填历史链上存证
@@ -433,7 +437,7 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------ 三区骨架重构（顶栏 / 左导航 / 状态栏）
     def _restructure_layout(self):
-        """把 gui.ui 的「横排导航 + 上下分栏」改为大厂风格三区骨架：
+        """把 gui.ui 的「横排导航 + 上下分栏」三区骨架：
         顶栏（产品名 / 用户 / 退出） + 左侧导航竖栏 + 主内容 + 底部状态栏。
         保留 gui.ui 中各业务页内容不动，仅重组顶层容器。
         """
@@ -594,14 +598,16 @@ class MainWindow(QMainWindow):
         self.lbl_search_summary = QLabel("当前显示可查看的 0 条存证")
         self.lbl_search_summary.setStyleSheet(f"color:{GRAY}; font-weight:bold;")
         v1.addWidget(self.lbl_search_summary)
-        self.tbl_search_results = QTableWidget(0, 5)
+        self.tbl_search_results = QTableWidget(0, 6)
         self.tbl_search_results.setHorizontalHeaderLabels(
-            ["file_id", "存证号", "文件名", "上传账号", "指纹(SM3)"])
+            ["file_id", "存证号", "文件名", "上传账号", "指纹(SM3)", "匹配方式"])
         self.tbl_search_results.horizontalHeader().setStretchLastSection(True)
         self.tbl_search_results.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.tbl_search_results.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self.tbl_search_results.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
         self.tbl_search_results.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self.tbl_search_results.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        self.tbl_search_results.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeToContents)
         self.tbl_search_results.verticalHeader().setVisible(False)
         self.tbl_search_results.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.tbl_search_results.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -659,7 +665,7 @@ class MainWindow(QMainWindow):
         decrypt_layout.addWidget(self.btn_save_recovered)
 
         # --- 4) 导出证据报告（独立一行） ---
-        self.btn_export_report = QPushButton("📄 导出证据报告 (.json)")
+        self.btn_export_report = QPushButton("📄 导出证据报告 (DOCX/PDF)")
         self.btn_export_report.setStyleSheet(
             "QPushButton { background:#3E7BFA; color:#ffffff; padding:8px 16px; border-radius:4px; } "
             "QPushButton:hover { background:#21C8F6; }")
@@ -691,16 +697,18 @@ class MainWindow(QMainWindow):
         - 修改密码卡：沿用 .ui 中的 pwd_group。
         """
         # ---------- 1) 身份卡：为账号信息组追加头像占位与角色徽标 ----------
+        self.profile_group.setTitle("身份信息")
         profile_grid = self.profile_group.layout()
         # 圆形头像占位（取用户名首字，深色渐变底）
         self.lbl_center_avatar = QLabel("●")
         self.lbl_center_avatar.setAlignment(Qt.AlignCenter)
-        self.lbl_center_avatar.setFixedSize(64, 64)
+        self.lbl_center_avatar.setFixedSize(76, 76)
         self.lbl_center_avatar.setStyleSheet(
             "QLabel { background:qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #3E7BFA,stop:1 #21C8F6);"
-            " color:#fff; border-radius:32px; font-size:28px; font-weight:bold; }")
+            " color:#FFFFFF; border:2px solid rgba(53,167,255,120);"
+            " border-radius:38px; font-size:30px; font-weight:bold; }")
         self.lbl_center_avatar.setToolTip("账号头像（占位）")
-        profile_grid.addWidget(self.lbl_center_avatar, 0, 2, 5, 1, Qt.AlignTop)
+        profile_grid.addWidget(self.lbl_center_avatar, 0, 2, 5, 1, Qt.AlignTop | Qt.AlignHCenter)
 
         # 角色徽标（与角色同一行右侧）
         self.lbl_center_role_badge = QLabel("")
@@ -710,17 +718,26 @@ class MainWindow(QMainWindow):
             "QLabel { background:#1DC981; color:#02121f; border-radius:11px; padding:0 12px; font-weight:bold; }")
         profile_grid.addWidget(self.lbl_center_role_badge, 2, 1, Qt.AlignLeft)
 
+        # 账号字段值统一高对比：纯白 / 显示名称加粗放大 / 注册时间弱化
+        self.lbl_center_username.setStyleSheet("color:#FFFFFF; font-size:14px;")
+        self.lbl_center_display.setStyleSheet("color:#FFFFFF; font-size:16px; font-weight:bold;")
+        self.lbl_center_created.setStyleSheet("color:#C7D9EE; font-size:13px;")
+        self.lbl_center_status.setStyleSheet("color:#1DC981; font-size:14px; font-weight:bold;")
+
         # ---------- 2) 统计卡 2×2 网格 ----------
-        stats_group = QGroupBox("存证统计")
+        stats_group = QGroupBox("数据概览")
         stats_group.setStyleSheet(
-            "QGroupBox { font-weight:bold; border:1px solid #1DC981; border-radius:8px; margin-top:12px; } "
-            "QGroupBox::title { subcontrol-origin: margin; left:12px; padding:0 6px; color:#1DC981; }")
+            "QGroupBox { font-weight:bold; border:1px solid rgba(53,167,255,110); border-radius:10px;"
+            " margin-top:12px; padding:14px; background:rgba(10,30,66,160); } "
+            "QGroupBox::title { subcontrol-origin: margin; left:14px; padding:0 6px;"
+            " color:#21C8F6; font-size:13px; }")
         grid = QGridLayout()
         grid.setSpacing(12)
 
         # 统一卡片样式：深色半透明底 + 左上标题 + 大字号数值
         card_qss = (
-            "QFrame { background:rgba(13,43,94,180); border:1px solid #2E5BBA; border-radius:8px; }"
+            "QFrame { background:rgba(13,43,94,200); border:1px solid rgba(53,167,255,110);"
+            " border-radius:10px; }"
         )
 
         def make_card(title, value_color="#21C8F6", placeholder=False):
@@ -728,18 +745,18 @@ class MainWindow(QMainWindow):
             card.setStyleSheet(card_qss)
             card.setMinimumHeight(96)
             lay = QVBoxLayout(card)
-            lay.setContentsMargins(14, 12, 14, 12)
+            lay.setContentsMargins(16, 12, 16, 12)
             lbl_title = QLabel(title)
-            lbl_title.setStyleSheet(f"color:{GRAY}; font-size:12px;")
+            lbl_title.setStyleSheet("color:#9CC3E8; font-size:12px;")
             lbl_value = QLabel("—")
             lbl_value.setStyleSheet(
-                f"font-weight:bold; font-size:22px; color:{'#8A8A93' if placeholder else value_color};")
+                f"font-weight:bold; font-size:24px; color:{'#7C8DA6' if placeholder else value_color};")
             lay.addWidget(lbl_title)
             lay.addWidget(lbl_value)
             if placeholder:
                 tag = QLabel("开发中")
                 tag.setAlignment(Qt.AlignRight)
-                tag.setStyleSheet("color:#8A8A93; font-size:11px;")
+                tag.setStyleSheet("color:#7C8DA6; font-size:11px;")
                 lay.addWidget(tag)
             return card, lbl_value
 
@@ -768,8 +785,40 @@ class MainWindow(QMainWindow):
 
         # 范围说明（保留原标签语义，挂在统计组下方）
         self.lbl_stats_scope = QLabel("统计范围：—")
-        self.lbl_stats_scope.setStyleSheet(f"color:{GRAY};")
+        self.lbl_stats_scope.setStyleSheet("color:#9CC3E8; font-size:12px;")
         self.center_body_layout.insertWidget(2, self.lbl_stats_scope)
+
+        # 修改密码改为独立弹窗入口：隐藏 .ui 内嵌的输入区，只保留一个入口卡片
+        self._build_password_entry_card()
+
+    def _build_password_entry_card(self):
+        """把内嵌修改密码输入区替换为「账号安全」入口卡（改密走独立深色弹窗）。"""
+        self.pwd_group.setVisible(False)      # 隐藏常驻的原密码/新密码输入框
+        self.lbl_pwd_hint.setVisible(False)
+
+        card = QGroupBox("账号安全")
+        card.setStyleSheet(
+            "QGroupBox { font-weight:bold; border:1px solid rgba(53,167,255,110); border-radius:10px;"
+            " margin-top:12px; padding:14px; background:rgba(10,30,66,160); } "
+            "QGroupBox::title { subcontrol-origin: margin; left:14px; padding:0 6px;"
+            " color:#21C8F6; font-size:13px; }")
+        row = QHBoxLayout(card)
+        row.setContentsMargins(14, 14, 14, 14)
+        tip = QLabel("修改登录密码将通过独立弹窗完成；修改后当前会话保持有效，下次登录请使用新密码。")
+        tip.setWordWrap(True)
+        tip.setStyleSheet("color:#9CC3E8; font-size:12px;")
+        self.btn_open_change_pwd = QPushButton("修改密码")
+        self.btn_open_change_pwd.setMinimumSize(0, 32)
+        self.btn_open_change_pwd.setStyleSheet(
+            "QPushButton { background:#1DC981; color:#02121f; font-weight:bold; padding:6px 20px; "
+            "border-radius:4px; } QPushButton:hover { background:#21C8F6; }")
+        self.btn_open_change_pwd.clicked.connect(self._change_password)
+        row.addWidget(tip, 1)
+        row.addWidget(self.btn_open_change_pwd)
+
+        # 插到「修改密码」原位置之前（即统计范围说明之后），保证顺序：身份 → 统计 → 账号安全
+        idx = self.center_body_layout.indexOf(self.pwd_group)
+        self.center_body_layout.insertWidget(idx if idx >= 0 else 3, card)
 
     def _refresh_center_stats(self):
         """按当前登录角色刷新中心页统计数据。"""
@@ -788,6 +837,11 @@ class MainWindow(QMainWindow):
         self.lbl_center_role_badge.setText(ROLE_NAMES.get(role, role))
         self.lbl_center_role_badge.setStyleSheet(
             f"QLabel {{ background:{badge_color}; color:#fff; border-radius:11px; padding:0 12px; font-weight:bold; }}")
+
+        # 账号状态：启用绿 / 禁用红
+        status = user.get("status")
+        self.lbl_center_status.setStyleSheet(
+            f"color:{GREEN if status == 'enabled' else RED}; font-size:14px; font-weight:bold;")
 
         # 本人存证数：登录用户本人上传
         try:
@@ -880,6 +934,180 @@ class MainWindow(QMainWindow):
         self.lbl_logs_msg.setWordWrap(True)
         layout.addWidget(self.lbl_logs_msg)
 
+    # --------------------------------------------------- AI 语义（前端可见）
+    def _mount_ai_page(self):
+        """插入「AI 语义」导航项与页面：状态、已建索引、试检索三块，均可现场验证。"""
+        page = QWidget()
+        page.setObjectName("tab_ai")
+        self.tab_ai = page
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(10)
+
+        # ① 引擎状态
+        status_group = QGroupBox("① AI 引擎状态")
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(18)
+        grid.setVerticalSpacing(6)
+        self.lbl_ai_rows = {}
+        items = [
+            ("llm", "对话模型（摘要/分类）"),
+            ("api", "接口地址"),
+            ("key", "API Key"),
+            ("content", "正文节选上限"),
+            ("emb", "向量模型（召回）"),
+            ("vec", "向量库条目"),
+        ]
+        for i, (key, label) in enumerate(items):
+            name = QLabel(label)
+            name.setStyleSheet(f"color:{GRAY};")
+            value = QLabel("—")
+            value.setWordWrap(True)
+            grid.addWidget(name, i, 0)
+            grid.addWidget(value, i, 1)
+            self.lbl_ai_rows[key] = value
+        grid.setColumnStretch(1, 1)
+        top_row = QHBoxLayout()
+        self.btn_ai_refresh = QPushButton("🔄 刷新状态")
+        self.btn_ai_refresh.setStyleSheet(
+            "QPushButton { background:#2E5BBA; color:#fff; padding:6px 14px; border-radius:4px; }")
+        top_row.addLayout(grid, 1)
+        top_row.addWidget(self.btn_ai_refresh, 0, Qt.AlignTop)
+        status_group.setLayout(top_row)
+        layout.addWidget(status_group)
+
+        # ② 已建立的语义索引
+        index_group = QGroupBox("② 已建立的 AI 语义索引（加密前本地生成，不含原文）")
+        index_layout = QVBoxLayout()
+        self.lbl_ai_index_summary = QLabel("正在加载…")
+        self.lbl_ai_index_summary.setStyleSheet(f"color:{GRAY};")
+        index_layout.addWidget(self.lbl_ai_index_summary)
+        self.tbl_ai_index = QTableWidget(0, 4)
+        self.tbl_ai_index.setHorizontalHeaderLabels(["文件名", "分类", "AI 语义摘要", "AI 关键词"])
+        self.tbl_ai_index.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.tbl_ai_index.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.tbl_ai_index.verticalHeader().setVisible(False)
+        self.tbl_ai_index.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.tbl_ai_index.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self.tbl_ai_index.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.tbl_ai_index.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        index_layout.addWidget(self.tbl_ai_index, 1)
+        index_group.setLayout(index_layout)
+        layout.addWidget(index_group, 1)
+
+        # ③ 语义检索试验
+        probe_group = QGroupBox("③ 语义检索试验（字面不重合也能召回）")
+        probe_layout = QVBoxLayout()
+        row = QHBoxLayout()
+        self.edt_ai_query = QLineEdit()
+        self.edt_ai_query.setPlaceholderText("例如：逾期履行要赔多少钱？")
+        self.btn_ai_probe = QPushButton("试检索")
+        self.btn_ai_probe.setStyleSheet(
+            "QPushButton { background:#1DC981; color:#fff; padding:6px 16px; border-radius:4px; }")
+        row.addWidget(self.edt_ai_query, 1)
+        row.addWidget(self.btn_ai_probe)
+        probe_layout.addLayout(row)
+        self.txt_ai_probe = QPlainTextEdit()
+        self.txt_ai_probe.setReadOnly(True)
+        self.txt_ai_probe.setMaximumBlockCount(200)
+        self.txt_ai_probe.setPlaceholderText("检索结果会显示 query 向量维度、top-3 相似度与命中文件")
+        probe_layout.addWidget(self.txt_ai_probe, 1)
+        probe_group.setLayout(probe_layout)
+        layout.addWidget(probe_group, 1)
+
+        # 插入 tabs 与导航
+        anchor = self.tabs.indexOf(self.tab_search)
+        at = (anchor + 1) if anchor >= 0 else self.tabs.count()
+        self.tabs.insertTab(at, page, "AI 语义")
+
+        btn = QPushButton("✦  AI 语义")
+        btn.setObjectName("btn_nav_ai")
+        btn.setMinimumHeight(40)
+        btn.setAutoExclusive(True)
+        side_layout = self.side_nav.layout()
+        side_layout.insertWidget(side_layout.indexOf(self.btn_nav_search) + 1, btn)
+        self._nav_buttons.insert(at, btn)
+
+        # 导航信号由 _bind 统一按索引绑定，这里不再单独连接
+        self.btn_ai_refresh.clicked.connect(self._refresh_ai_page)
+        self.btn_ai_probe.clicked.connect(self._ai_probe)
+        self.edt_ai_query.returnPressed.connect(self._ai_probe)
+
+        # 顶栏状态标识
+        self.lbl_ai_badge = QLabel("AI 语义：检测中")
+        self.lbl_ai_badge.setObjectName("lbl_ai_badge")
+        self.top_bar.layout().insertWidget(2, self.lbl_ai_badge)
+        self._refresh_ai_page()
+
+    def _refresh_ai_page(self):
+        try:
+            status = self.svc.semantic_status()
+        except Exception as exc:
+            self.lbl_ai_rows["llm"].setText(f"读取失败：{exc}")
+            return
+        llm_on = status["llm_enabled"] and status["key_ready"]
+        self.lbl_ai_rows["llm"].setText(
+            ("%s（已启用）" % status["llm_model"]) if status["llm_enabled"] else "已关闭")
+        self.lbl_ai_rows["api"].setText(status["api_base"] or "（未配置）")
+        self.lbl_ai_rows["key"].setText(
+            ("已配置（环境变量）" if status["key_ready"] else "未配置 → 语义增强不可用，检索降级为关键词"))
+        self.lbl_ai_rows["content"].setText(
+            ("最多 %d 字正文节选参与摘要" % status["max_chars"]) if status["reads_content"]
+            else "不读取正文（仅用文件名与元数据）")
+        self.lbl_ai_rows["emb"].setText(
+            ("%s%s" % (status["embedding_model"], "" if status["embedding_ready"] else "（不可用）"))
+            if status["embedding_enabled"] else "已关闭")
+        self.lbl_ai_rows["vec"].setText("%d 条指纹向量" % status["vector_count"])
+
+        ok_color = "#1DC981" if (llm_on and status["embedding_ready"]) else "#F2A33C"
+        self.lbl_ai_badge.setText(
+            "● AI 语义已启用 · %s" % status["llm_model"] if (llm_on and status["embedding_ready"])
+            else "● AI 语义未就绪 · 降级关键词检索")
+        self.lbl_ai_badge.setStyleSheet(
+            "QLabel { color:%s; padding:2px 10px; border:1px solid %s; border-radius:10px; }"
+            % (ok_color, ok_color))
+
+        items = []
+        try:
+            items = self.svc.list_semantic_indexes(limit=80)
+        except Exception:
+            items = []
+        self.tbl_ai_index.setRowCount(len(items))
+        for row, it in enumerate(items):
+            self.tbl_ai_index.setItem(row, 0, QTableWidgetItem(it["file_name"]))
+            self.tbl_ai_index.setItem(row, 1, QTableWidgetItem(it["category"] or "—"))
+            self.tbl_ai_index.setItem(row, 2, QTableWidgetItem(it["summary"] or "—"))
+            self.tbl_ai_index.setItem(row, 3, QTableWidgetItem("、".join(it["keywords"]) or "—"))
+        if items:
+            self.lbl_ai_index_summary.setText("共 %d 条存证带 AI 语义索引" % len(items))
+        else:
+            self.lbl_ai_index_summary.setText(
+                "暂无 AI 语义索引：完成一次存证签署后，加密前会自动生成摘要与关键词并入库")
+
+    def _ai_probe(self):
+        query = self.edt_ai_query.text().strip()
+        if not query:
+            self.txt_ai_probe.setPlainText("请先输入一句自然语言检索语句。")
+            return
+        self.txt_ai_probe.setPlainText("检索中…（需调用一次向量接口）")
+        QApplication.processEvents()
+        try:
+            res = self.svc.semantic_probe(query, top_k=3)
+        except Exception as exc:
+            self.txt_ai_probe.setPlainText(f"检索失败：{type(exc).__name__}: {exc}")
+            return
+        if not res.get("ok"):
+            self.txt_ai_probe.setPlainText("未执行：" + (res.get("reason") or "未知原因"))
+            return
+        lines = ["query 向量维度：%d" % res["dim"], ""]
+        if not res["hits"]:
+            lines.append("向量库为空：先完成一次存证签署，才有可比对的向量。")
+        for i, hit in enumerate(res["hits"], 1):
+            lines.append("%d. 相似度 %.4f  %s" % (i, hit["score"], hit["file_name"]))
+            lines.append("   指纹 %s" % short(hit["digest"], 16, 8))
+        self.txt_ai_probe.setPlainText("\n".join(lines))
+        self.log("🧠 语义试检索：「%s」返回 %d 条候选" % (query, len(res["hits"])), module="search")
+
     def _build_report_tab(self):
         """构建「存证报告」页：链上存证列表 + 生成报告 + 预览 + 导出。"""
         layout = self.tab_report.layout()
@@ -893,10 +1121,19 @@ class MainWindow(QMainWindow):
         self.btn_report_refresh = QPushButton("🔄 刷新列表")
         self.btn_report_refresh.setStyleSheet(
             "QPushButton { background:#2E5BBA; color:#fff; padding:6px 14px; border-radius:4px; }")
+        self.cmb_report_kind = QComboBox()
+        self.cmb_report_kind.addItem("存证凭证（已上链回执）", "receipt")
+        self.cmb_report_kind.addItem("证据报告（三重校验鉴定）", "proof")
+        self.cmb_report_kind.setMinimumWidth(210)
+        self.chk_report_file = QCheckBox("证据报告附带原文件校验")
+        self.chk_report_file.setToolTip("勾选后生成证据报告时选择一份文件，重算 SM3 并与链上比对；"
+                                        "不勾选则仅做链上与签名核验，报告会如实标注「未核验」")
         self.btn_report_generate = QPushButton("📄 生成选中存证的报告")
         self.btn_report_generate.setStyleSheet(
             "QPushButton { background:#1DC981; color:#fff; padding:6px 14px; border-radius:4px; }")
         btn_row.addWidget(self.btn_report_refresh)
+        btn_row.addWidget(self.cmb_report_kind)
+        btn_row.addWidget(self.chk_report_file)
         btn_row.addWidget(self.btn_report_generate)
         btn_row.addStretch()
         list_layout.addLayout(btn_row)
@@ -923,23 +1160,32 @@ class MainWindow(QMainWindow):
 
         # 底部：导出按钮
         export_row = QHBoxLayout()
+        self.lbl_report_kind_hint = QLabel("未生成报告")
+        self.lbl_report_kind_hint.setStyleSheet(f"color:{GRAY};")
+        export_row.addWidget(self.lbl_report_kind_hint)
+        export_row.addStretch()
+        self.btn_report_export_docx = QPushButton("📝 导出 DOCX")
+        self.btn_report_export_docx.setStyleSheet(
+            "QPushButton { background:#2E5BBA; color:#fff; padding:8px 16px; border-radius:4px; }")
+        self.btn_report_export_pdf = QPushButton("📕 导出 PDF")
+        self.btn_report_export_pdf.setStyleSheet(
+            "QPushButton { background:#7B5CFA; color:#fff; padding:8px 16px; border-radius:4px; }")
         self.btn_report_export_json = QPushButton("💾 导出 JSON")
         self.btn_report_export_json.setStyleSheet(
             "QPushButton { background:#3E7BFA; color:#fff; padding:8px 16px; border-radius:4px; }")
-        self.btn_report_export_html = QPushButton("🌐 导出 HTML")
-        self.btn_report_export_html.setStyleSheet(
-            "QPushButton { background:#21C8F6; color:#fff; padding:8px 16px; border-radius:4px; }")
+        export_row.addWidget(self.btn_report_export_docx)
+        export_row.addWidget(self.btn_report_export_pdf)
         export_row.addWidget(self.btn_report_export_json)
-        export_row.addWidget(self.btn_report_export_html)
-        export_row.addStretch()
         layout.addLayout(export_row)
 
-        self._current_report = None
+        self._current_report = None      # 原始字段（供 JSON 导出）
+        self._current_block = None       # 渲染块模型（供 DOCX/PDF 导出）
         # 连接信号
         self.btn_report_refresh.clicked.connect(self._refresh_report_list)
         self.btn_report_generate.clicked.connect(self._generate_report)
+        self.btn_report_export_docx.clicked.connect(lambda: self._export_report_file("docx"))
+        self.btn_report_export_pdf.clicked.connect(lambda: self._export_report_file("pdf"))
         self.btn_report_export_json.clicked.connect(self._export_report_json)
-        self.btn_report_export_html.clicked.connect(self._export_report_html)
 
     def _refresh_report_list(self):
         """刷新报告页的链上存证列表。"""
@@ -970,32 +1216,102 @@ class MainWindow(QMainWindow):
         item = self.tbl_report_evidence.item(row, 0)
         return item.data(Qt.UserRole) if item else None
 
+    @staticmethod
+    def _render_report_preview(block):
+        """把报告块模型渲染成纯文本预览（与 DOCX/PDF 同源，避免预览与导出口径不一致）。"""
+        lines = ["═" * 30, block["title"], block["subtitle"], "═" * 30]
+        for k, v in block.get("meta", []):
+            lines.append(f"{k}：{v}")
+        for title, rows in block.get("sections", []):
+            lines.append("")
+            lines.append(f"【{title}】")
+            for k, v in rows:
+                lines.append(f"{k}：{v}")
+        lines.append("")
+        lines.append(f"【{block['conclusion_label']}】{block['conclusion']}")
+        if block.get("statement"):
+            lines.append("")
+            lines.append("【声明】")
+            lines.extend(block["statement"])
+        return "\n".join(lines)
+
     def _generate_report(self):
         ev_no = self._selected_report_evidence_no()
         if not ev_no:
             self.log("⚠ 请先在列表中选中一条存证", module="report")
+            dialogs.info(self, "提示", "请先在「链上存证列表」中选中一条存证。")
             return
-        self.log(f"📄 生成报告：{short(ev_no, 12, 6)} ...", module="report")
+        kind = self.cmb_report_kind.currentData()
+        label = self.cmb_report_kind.currentText()
+
+        candidate = None
+        if kind == "proof" and self.chk_report_file.isChecked():
+            path, _ = QFileDialog.getOpenFileName(
+                self, "选择待核验的原文件（用于重算 SM3 指纹）", "", "所有文件 (*)")
+            if path:
+                try:
+                    with open(path, "rb") as f:
+                        candidate = f.read()
+                except OSError as exc:
+                    self.log(f"✖ 读取原文件失败：{exc}", module="report")
+                    return
+
+        self.log(f"📄 生成{label}：{short(ev_no, 12, 6)} ...", module="report")
         try:
-            report = self.svc.evidence_report(ev_no)
-        except ValueError as exc:
-            self.log(f"✖ 报告生成失败：{exc}", module="report")
+            if kind == "receipt":
+                data = self.svc.receipt_report(ev_no)
+                block = report_export.build_receipt(data)
+            else:
+                data = self.svc.proof_report(ev_no, candidate)
+                block = report_export.build_proof(data)
+        except Exception as exc:
+            self.log(f"✖ 报告生成失败：{type(exc).__name__}: {exc}", module="report")
+            dialogs.warn(self, "生成失败", f"{type(exc).__name__}: {exc}")
             return
-        self._current_report = report
-        # 渲染为可读文本预览
-        lines = ["═══════════ 存证凭证报告 ═══════════"]
-        for k, v in report.items():
-            lines.append(f"{k}：{v}")
-        lines.append("═══════════════════════════════════")
-        self.txt_report_preview.setPlainText("\n".join(lines))
-        self.log(f"✅ 报告已生成，含 {len(report)} 个字段", module="report")
+
+        self._current_report = data
+        self._current_block = block
+        self.txt_report_preview.setPlainText(self._render_report_preview(block))
+        self.lbl_report_kind_hint.setText(f"当前：{block['title']}（{ev_no}）")
+
+        if kind == "proof":
+            verdict = ("通过" if data["passed"] else
+                       ("部分核验（内容一致性未核验）" if data.get("conclusion_ok") is None else "未通过"))
+            self.log(f"✅ 证据报告已生成，核验结论：{verdict}；已含 {len(block['sections'])} 个章节",
+                     module="report")
+        else:
+            self.log(f"✅ 存证凭证已生成，凭证编号 {data['凭证编号']}", module="report")
+
+    def _export_report_file(self, ext: str):
+        """导出当前报告为 DOCX / PDF；两种模板各自成文，不复用同一份内容。"""
+        if not self._current_block:
+            self.log("⚠ 请先生成报告", module="report")
+            dialogs.info(self, "提示", "请先点击「生成选中存证的报告」。")
+            return
+        block = self._current_block
+        ev_no = (self._current_report or {}).get("存证编号", "")
+        suggested = report_export.suggest_name(block, ev_no) + "." + ext
+        filt = "Word 文档 (*.docx)" if ext == "docx" else "PDF 文档 (*.pdf)"
+        path, _ = QFileDialog.getSaveFileName(self, f"导出{block['title']}", suggested, filt)
+        if not path:
+            return
+        if not path.lower().endswith("." + ext):
+            path += "." + ext
+        try:
+            report_export.export(block, path)
+        except Exception as exc:
+            self.log(f"✖ 导出失败：{type(exc).__name__}: {exc}", module="report")
+            dialogs.warn(self, "导出失败", f"{type(exc).__name__}: {exc}")
+            return
+        self.log(f"✅ {ext.upper()} 已导出：{path}", module="report")
 
     def _export_report_json(self):
         if not self._current_report:
             self.log("⚠ 请先生成报告", module="report")
             return
         import json as _json
-        suggested = f"evidence_{self._current_report['存证编号'][:12]}.json"
+        block = self._current_block or {"kind": "receipt"}
+        suggested = report_export.suggest_name(block, self._current_report.get("存证编号", "")) + ".json"
         path, _ = QFileDialog.getSaveFileName(self, "导出报告 JSON", suggested, "JSON (*.json)")
         if not path:
             return
@@ -1003,33 +1319,6 @@ class MainWindow(QMainWindow):
             with open(path, "w", encoding="utf-8") as f:
                 _json.dump(self._current_report, f, ensure_ascii=False, indent=2)
             self.log(f"✅ JSON 报告已保存：{path}", module="report")
-        except OSError as exc:
-            self.log(f"✖ 保存失败：{exc}", module="report")
-
-    def _export_report_html(self):
-        if not self._current_report:
-            self.log("⚠ 请先生成报告", module="report")
-            return
-        suggested = f"evidence_{self._current_report['存证编号'][:12]}.html"
-        path, _ = QFileDialog.getSaveFileName(self, "导出报告 HTML", suggested, "HTML (*.html)")
-        if not path:
-            return
-        rows = "".join(
-            f"<tr><th>{k}</th><td>{v}</td></tr>" for k, v in self._current_report.items())
-        html = (
-            "<!DOCTYPE html><html><head><meta charset='utf-8'>"
-            "<title>存证凭证报告</title>"
-            "<style>body{font-family:'Microsoft YaHei',sans-serif;background:#0A1E42;color:#E6F1FF;margin:24px;}"
-            "h1{color:#1DC981;}table{border-collapse:collapse;width:100%;max-width:720px;margin-top:16px;}"
-            "th,td{border:1px solid #1DC981;padding:8px 12px;text-align:left;}"
-            "th{background:#0D2B5E;color:#1DC981;width:180px;}"
-            "td{word-break:break-all;}</style></head><body>"
-            f"<h1>存证凭证报告</h1><table>{rows}</table></body></html>"
-        )
-        try:
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(html)
-            self.log(f"✅ HTML 报告已保存：{path}", module="report")
         except OSError as exc:
             self.log(f"✖ 保存失败：{exc}", module="report")
 
@@ -1049,7 +1338,7 @@ class MainWindow(QMainWindow):
             self.svc.log_entry(module, msg)
         except Exception:
             pass
-        if getattr(self, "tbl_logs", None) is not None and self.tabs.currentIndex() == 6:
+        if getattr(self, "tbl_logs", None) is not None and self.tabs.currentWidget() is self.tab_logs:
             self._refresh_log_view()
 
     def _refresh_log_view(self):
@@ -1167,6 +1456,24 @@ class MainWindow(QMainWindow):
         self._last_file_id = file_id
         self._register_evidence(ev_no, name)
 
+        # AI 语义索引：加密前由 GLM 生成摘要/关键词/分类，存证完成后即时回显到界面
+        try:
+            summary, keywords, category = self.svc._semantic_of(tx["contract_hash"])
+            if summary or keywords:
+                ai_line = "🧠 AI 语义索引：%s" % (summary or "（仅关键词索引）")
+                if keywords:
+                    ai_line += " ｜ 关键词 " + "、".join(keywords[:5])
+                if category:
+                    ai_line += " ｜ 分类 " + category
+                self.log(ai_line, module="evidence")
+                self.lbl_sign_result.setText(
+                    self.lbl_sign_result.text() + "\nAI 语义：" + (summary or "、".join(keywords[:5]))
+                )
+            if hasattr(self, "_refresh_ai_page"):
+                self._refresh_ai_page()
+        except Exception as exc:
+            self.log(f"⚠ AI 语义索引回显失败（不影响存证）：{exc}", module="evidence")
+
     def on_countersign(self):
         if self._signed_file is None:
             self.log("⚠ 尚无已签署文件，请先点击「签署并上链」", module="evidence")
@@ -1204,24 +1511,26 @@ class MainWindow(QMainWindow):
     # --------------------------------------------- 页面导航 / 登录态
     def _goto_page(self, index: int):
         """跳转页面：整页覆盖显示，不做多标签并列。带页访问守卫。"""
-        # 页访问守卫：users 页（index 7）仅 superadmin；
-        # logs 页（index 6）对所有登录用户开放（内容仍按 user_id 隔离）
+        # 页访问守卫：users 页仅 superadmin；logs 页对所有登录用户开放（内容仍按 user_id 隔离）
         user = self.svc.current_user()
         role = user["role"] if user else None
-        if index == 7 and role != "superadmin":
+        if index == self.tabs.indexOf(self.tab_users) and role != "superadmin":
             dialogs.warn(self, "无权限", "仅超级管理员可访问用户权限管理页")
             return
         self.tabs.setCurrentIndex(index)
         for i, btn in enumerate(self._nav_buttons):
             btn.setChecked(i == index)
-        if index == 2:
+        if self.tabs.currentWidget() is self.tab_search:
             # 进入检索页默认做一次空检索，展示当前登录用户可查看的存证列表
             self.edt_search.clear()
             self.on_search(quiet=True)
-        elif index == 4:
+        elif self.tabs.currentWidget() is self.tab_report:
             # 进入报告页自动刷新链上存证列表
             self._refresh_report_list()
-        elif index == 6:
+        elif self.tabs.currentWidget() is getattr(self, "tab_ai", None):
+            # 进入 AI 语义页刷新引擎状态与索引列表
+            self._refresh_ai_page()
+        elif self.tabs.currentWidget() is self.tab_logs:
             # 进入日志页刷新历史日志
             self._refresh_log_view()
 
@@ -1288,51 +1597,39 @@ class MainWindow(QMainWindow):
         if is_super:
             self._setup_user_admin()
             self._refresh_users()
-        elif self.tabs.currentIndex() == 7:
+        elif self.tabs.currentWidget() is self.tab_users:
             self._goto_page(0)
 
         # ---- 中心页统计：按角色展示可查看范围的存证统计 ----
         self._refresh_center_stats()
         self._update_status_bar()
 
-        self._clear_pwd_fields()
-        self.lbl_pwd_msg.clear()
-        if self.tabs.currentIndex() == 2:
+        if self.tabs.currentWidget() is self.tab_search:
             self.on_search(quiet=True)         # 登录态变化后刷新「可查看存证」列表
         if announce:
             self.log(f"当前登录用户：{user['display_name']}（{user['username']} / {role}），"
                      "本次存证将归属该账号", module="auth")
 
-    def _clear_pwd_fields(self):
-        for edt in (self.edt_old_pwd, self.edt_new_pwd, self.edt_new_pwd2):
-            edt.clear()
-
-    def _set_pwd_msg(self, text, ok=True):
-        self.lbl_pwd_msg.setText(text)
-        self.lbl_pwd_msg.setStyleSheet(f"color:{GREEN if ok else RED};")
-
     def _change_password(self):
-        old = self.edt_old_pwd.text()
-        new = self.edt_new_pwd.text()
-        confirm = self.edt_new_pwd2.text()
-        if not old or not new:
-            self._set_pwd_msg("请完整填写原密码与新密码", ok=False)
+        """打开修改密码独立弹窗，校验通过后调用 service 改密。"""
+        user = self.svc.current_user()
+        if not user:
+            dialogs.warn(self, "修改密码", "请先登录后再修改密码")
             return
-        if new != confirm:
-            self._set_pwd_msg("两次输入的新密码不一致", ok=False)
+        dlg = dialogs.ChangePasswordDialog(self)
+        if dlg.exec_() != QDialog.Accepted:
             return
+        old, new = dlg.values()
         try:
             self.svc.change_password(old, new)
         except (PermissionError, ValueError) as exc:
-            self._set_pwd_msg(str(exc), ok=False)
+            dialogs.warn(self, "修改密码失败", str(exc))
             return
         except Exception as exc:
-            self._set_pwd_msg(f"修改失败：{type(exc).__name__}: {exc}", ok=False)
+            dialogs.warn(self, "修改密码失败", f"{type(exc).__name__}: {exc}")
             return
-        user = self.svc.current_user()
-        self._clear_pwd_fields()
-        self._set_pwd_msg("密码修改成功，下次登录请使用新密码", ok=True)
-        self.log(f"账号 {user['username'] if user else ''} 修改密码成功（PBKDF2 重新加盐哈希）", module="auth")
+        dialogs.info(self, "修改密码", "密码修改成功，下次登录请使用新密码")
+        self.log(f"账号 {user['username']} 修改密码成功（PBKDF2 重新加盐哈希）", module="auth")
 
     def _reset_ui_for_login(self):
         """登出后清空所有业务页残留数据，复位到登录前的干净状态，再弹出登录框。"""
@@ -1573,7 +1870,11 @@ class MainWindow(QMainWindow):
 
     def _reset_rows(self):
         for name in self.rows:
+            if name == "审计方签名":
+                continue          # 审计方行仅有实际签认时显示，复位时清空并隐藏
             self._set_row(name, None, "待检测")
+        self.row_auditor.setText("")
+        self.row_auditor.setVisible(False)
         self.lbl_conclusion.setText("结论：—")
         self.lbl_conclusion.setStyleSheet("")
 
@@ -1598,14 +1899,16 @@ class MainWindow(QMainWindow):
                           checks["签名(SM2)"].splitlines()[0])
         else:
             self._set_row("签名(SM2)", None, "未检测（完整性已失败）")
-        # 审计方签名验证：通过=绿 / 失败=红 / 未检测=灰
-        audit_msg = checks.get("审计方签名", "未检测：暂无审计方追加签认")
+        # 审计方签名验证：仅有实际签认（通过/失败）时才显示该行；无签认则整行隐藏
+        audit_msg = checks.get("审计方签名", "")
         if audit_msg.startswith("通过"):
             self._set_row("审计方签名", True, audit_msg.splitlines()[0])
+            self.row_auditor.setVisible(True)
         elif audit_msg.startswith("失败"):
             self._set_row("审计方签名", False, audit_msg.splitlines()[0])
+            self.row_auditor.setVisible(True)
         else:
-            self._set_row("审计方签名", None, audit_msg.splitlines()[0])
+            self.row_auditor.setVisible(False)
         if v["passed"]:
             multi = v.get("multi_sign_ok", False)
             if multi:
@@ -1667,7 +1970,7 @@ class MainWindow(QMainWindow):
         self._set_row("链上存证", True, f"通过：存在，区块 #{on_chain['block']['index']}")
         self._set_row("完整性(SM3)", True, "通过：文件未被篡改")
         self._set_row("签名(SM2)", False, "失败：伪造签名无效（签名主体不可信）")
-        self._set_row("审计方签名", None, "未检测（攻击演示场景）")
+        self.row_auditor.setVisible(False)   # 攻击演示场景不涉及审计方签认
         self.lbl_conclusion.setText("🛡 攻击被拦截：伪造签名无法通过真实上传方公钥验签 —— 不可否认性有效")
         self.lbl_conclusion.setStyleSheet("font-weight:bold; font-size:15px;")
 
@@ -1693,10 +1996,29 @@ class MainWindow(QMainWindow):
             self.tbl_search_results.setItem(row, 2, QTableWidgetItem(r.get("file_name") or r.get("file_id") or ""))
             self.tbl_search_results.setItem(row, 3, QTableWidgetItem(r.get("uploader_username") or "匿名"))
             self.tbl_search_results.setItem(row, 4, QTableWidgetItem(short(r.get("file_sha256") or "", 14, 6)))
+            # 匹配方式：区分「向量语义召回」与「关键词命中」，让 AI 参与在界面上可见
+            kind = r.get("match")
+            if kind == "vector":
+                cell = QTableWidgetItem("语义 %.2f" % float(r.get("score") or 0))
+                cell.setForeground(QBrush(QColor("#1DC981")))
+            elif query:
+                cell = QTableWidgetItem("关键词")
+                cell.setForeground(QBrush(QColor(GRAY)))
+            else:
+                cell = QTableWidgetItem("—")
+                cell.setForeground(QBrush(QColor(GRAY)))
+            self.tbl_search_results.setItem(row, 5, cell)
         if query:
+            vector_n = sum(1 for r in results if r.get("match") == "vector")
             summary = f"「{query}」命中的 {len(results)} 条存证（当前可查看范围内）"
+            if vector_n:
+                summary += f"，其中 {vector_n} 条来自向量语义召回"
             if not quiet:
-                self.log(f"🔍 关键词检索：「{query}」（按当前登录用户权限过滤）", module="search")
+                if vector_n:
+                    self.log(f"🔍 语义检索：「{query}」命中 {len(results)} 条（向量语义 {vector_n} 条）",
+                             module="search")
+                else:
+                    self.log(f"🔍 关键词检索：「{query}」（按当前登录用户权限过滤）", module="search")
         else:
             summary = f"当前显示可查看的 {len(results)} 条存证"
             if not quiet:
@@ -1822,33 +2144,45 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------ 导出证据报告（P0-3）
     def on_export_report(self):
+        """验真页导出「证据报告」：带当前待验真文件做完整三重校验，输出 DOCX/PDF。"""
         ev_no = self.cmb_evidence.currentData()
         if not ev_no:
             self.log("⚠ 请先在「验真溯源」页选中一个链上存证（cmb_evidence 下拉框）", module="report")
             return
-        self.log(f"📄 生成证据报告：{short(ev_no, 12, 6)} ...", module="report")
+        candidate = self.tab2_file[1] if self.tab2_file else None
+        if candidate is None and self.tab1_file:
+            candidate = self.tab1_file[1]
+        self.log(f"📄 生成证据报告：{short(ev_no, 12, 6)}（"
+                 f"{'含原文件完整性校验' if candidate is not None else '仅链上核验'}）...", module="report")
         try:
-            report = self.svc.evidence_report(ev_no)
-        except ValueError as exc:
-            self.log(f"✖ 报告生成失败：{exc}", module="report")
+            data = self.svc.proof_report(ev_no, candidate)
+            block = report_export.build_proof(data)
+        except Exception as exc:
+            self.log(f"✖ 报告生成失败：{type(exc).__name__}: {exc}", module="report")
+            dialogs.warn(self, "生成失败", f"{type(exc).__name__}: {exc}")
             return
 
-        suggested = f"evidence_{ev_no[:12]}.json"
-        path, _ = QFileDialog.getSaveFileName(
-            self, "导出证据报告", suggested, "JSON 文件 (*.json);;所有文件 (*)")
+        suggested = report_export.suggest_name(block, ev_no) + ".docx"
+        path, selected = QFileDialog.getSaveFileName(
+            self, "导出证据报告", suggested, "Word 文档 (*.docx);;PDF 文档 (*.pdf)")
         if not path:
             self.log("（用户取消保存）", module="report")
             return
-
-        import json as _json
+        ext = os.path.splitext(path)[1].lower()
+        if ext not in (".docx", ".pdf"):
+            ext = ".pdf" if "PDF" in (selected or "") else ".docx"
+            path += ext
         try:
-            with open(path, "w", encoding="utf-8") as f:
-                _json.dump(report, f, ensure_ascii=False, indent=2)
-        except OSError as exc:
-            self.log(f"✖ 写入文件失败：{exc}", module="report")
+            report_export.export(block, path)
+        except Exception as exc:
+            self.log(f"✖ 导出失败：{type(exc).__name__}: {exc}", module="report")
+            dialogs.warn(self, "导出失败", f"{type(exc).__name__}: {exc}")
             return
         self.log(f"✅ 证据报告已保存：{path}", module="report")
-        self.log(f"   含字段：存证编号 / 文件指纹 / 存证主体 / 签名值 / 区块高度 / 区块哈希 / 出块节点 / 存证时间 / 共识确认数", module="report")
+        verdict = ("通过 ✅" if data["passed"] else
+                   ("部分核验 ⚠（内容一致性未核验）" if data.get("conclusion_ok") is None else "未通过 ❌"))
+        self.log(f"   核验结论：{verdict}；"
+                 f"完整性：{data['完整性结论']}；审计签认：{data['审计签认结论']}", module="report")
 
 
 def main():

@@ -30,14 +30,14 @@ class DropArea(QLabel):
 
     def _reset_style(self):
         self.setStyleSheet(
-            "QLabel { border: 2px dashed #B9BDC7; border-radius: 10px;"
-            " color: #6B7280; padding: 8px; background: rgba(127,127,127,8%); }"
+            "QLabel { border: 2px dashed rgba(53, 167, 255, 150); border-radius: 10px;"
+            " color: #9CC3E8; padding: 8px; background: rgba(53, 167, 255, 8%); }"
         )
 
     def _loaded_style(self):
         self.setStyleSheet(
             "QLabel { border: 2px solid #1DC981; border-radius: 10px;"
-            " color: #111827; padding: 8px; background: rgba(29,201,129,8%); }"
+            " color: #E6F1FF; padding: 8px; background: rgba(29, 201, 129, 12%); }"
         )
 
     def dragEnterEvent(self, event):

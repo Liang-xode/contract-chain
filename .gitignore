@@ -23,8 +23,7 @@ evidence_state.json.tmp
 venv/
 env/
 
-# conda-pack 运行环境产物（体积过百 MB，不入库）
-contract-chain-env.tar.gz
+
 
 # IDE / 编辑器
 .idea/
@@ -40,7 +39,6 @@ mi.py
 test1.doc
 test3.txt
 .demo_files/
-.cipher_store/
 demo_files/毕业论文_定稿.docx
 demo_files/采购框架协议.pdf
 demo_files/年度财务报表.xlsx
@@ -49,3 +47,8 @@ demo_files/核心源码_main.py.zip
 demo_files/test2.ppt
 改造指令-信链v2.md
 cipher_store/FILE-006.enc
+.cipher_store/
+evidence.db.bak_20261105_211858
+cipher_store/FILE-001.enc
+cipher_store/
+核验指令-报告与AI前端（给Trae）.md

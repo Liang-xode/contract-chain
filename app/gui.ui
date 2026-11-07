@@ -593,7 +593,7 @@ QLabel#lbl_nav_user {
                 <item row="0" column="0">
                  <widget class="QLabel" name="lbl_center_username_cap">
                   <property name="styleSheet">
-                   <string notr="true">color: #6B7280;</string>
+                   <string notr="true">color: #9CC3E8;</string>
                   </property>
                   <property name="text">
                    <string>用户名</string>
@@ -613,7 +613,7 @@ QLabel#lbl_nav_user {
                 <item row="1" column="0">
                  <widget class="QLabel" name="lbl_center_display_cap">
                   <property name="styleSheet">
-                   <string notr="true">color: #6B7280;</string>
+                   <string notr="true">color: #9CC3E8;</string>
                   </property>
                   <property name="text">
                    <string>显示名称</string>
@@ -633,7 +633,7 @@ QLabel#lbl_nav_user {
                 <item row="2" column="0">
                  <widget class="QLabel" name="lbl_center_role_cap">
                   <property name="styleSheet">
-                   <string notr="true">color: #6B7280;</string>
+                   <string notr="true">color: #9CC3E8;</string>
                   </property>
                   <property name="text">
                    <string>账号角色</string>
@@ -650,7 +650,7 @@ QLabel#lbl_nav_user {
                 <item row="3" column="0">
                  <widget class="QLabel" name="lbl_center_status_cap">
                   <property name="styleSheet">
-                   <string notr="true">color: #6B7280;</string>
+                   <string notr="true">color: #9CC3E8;</string>
                   </property>
                   <property name="text">
                    <string>账号状态</string>
@@ -667,7 +667,7 @@ QLabel#lbl_nav_user {
                 <item row="4" column="0">
                  <widget class="QLabel" name="lbl_center_created_cap">
                   <property name="styleSheet">
-                   <string notr="true">color: #6B7280;</string>
+                   <string notr="true">color: #9CC3E8;</string>
                   </property>
                   <property name="text">
                    <string>注册时间</string>
