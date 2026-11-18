@@ -1033,10 +1033,11 @@ class MainWindow(QMainWindow):
         self.btn_ai_probe.clicked.connect(self._ai_probe)
         self.edt_ai_query.returnPressed.connect(self._ai_probe)
 
-        # 顶栏状态标识
+        # 顶栏状态标识（默认隐藏，仅保留状态刷新逻辑供 AI 语义页使用）
         self.lbl_ai_badge = QLabel("AI 语义：检测中")
         self.lbl_ai_badge.setObjectName("lbl_ai_badge")
         self.top_bar.layout().insertWidget(2, self.lbl_ai_badge)
+        self.lbl_ai_badge.setVisible(False)
         self._refresh_ai_page()
 
     def _refresh_ai_page(self):
